@@ -1,10 +1,14 @@
 import hashlib
+import json
 import re
 
 MOD = 1_000_000_007
 WORKLOAD = "hash_sum_v1"
+PYTHON_WORKLOAD = "python_func"
 MAX_ITERATIONS = 500_000
 MAX_CHUNKS = 64
+MAX_PYTHON_CODE = 65536
+MAX_PYTHON_ARGS = 8192
 SEED_PATTERN = re.compile(r"^[A-Za-z0-9:_-]{1,64}$")
 
 
@@ -24,6 +28,24 @@ def normalize_params(params):
     if not 1 <= chunks <= MAX_CHUNKS:
         raise ValueError(f"chunks must be 1..{MAX_CHUNKS}")
     return {"seed": seed, "iterations": iterations, "chunks": chunks}
+
+
+def normalize_python_params(params):
+    if not isinstance(params, dict):
+        raise ValueError("params must be an object")
+    code = params.get("code")
+    if not isinstance(code, str) or not code.strip():
+        raise ValueError("code must be a non-empty string")
+    if len(code.encode("utf-8")) > MAX_PYTHON_CODE:
+        raise ValueError(f"code exceeds {MAX_PYTHON_CODE} bytes")
+    args = params.get("args")
+    try:
+        encoded = json.dumps(args, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError) as error:
+        raise ValueError("args must be JSON-serializable") from error
+    if len(encoded.encode("utf-8")) > MAX_PYTHON_ARGS:
+        raise ValueError(f"args exceeds {MAX_PYTHON_ARGS} bytes")
+    return {"code": code, "args": args}
 
 
 def chunk_bounds(iterations, chunks):

@@ -113,6 +113,7 @@ class ApiClient:
         duration_ms=None,
         error=None,
         metrics=None,
+        stdout=None,
     ):
         payload = {
             "device_id": device_id,
@@ -124,6 +125,8 @@ class ApiClient:
         }
         if result is not None:
             payload["result"] = result
+        if stdout is not None:
+            payload["stdout"] = stdout
         return self.request("POST", "/api/v1/tasks/result", payload)
 
     def create_task(self, device_id, params, resource_limits, admin_key):

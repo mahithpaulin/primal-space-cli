@@ -9,8 +9,16 @@ from datetime import datetime, timezone
 from .api import ApiClient, ApiError
 from .config import load_config, save_config
 from .resources import battery_info, cpu_load_pct, cpu_usage_pct, network_info
+from .sandbox import SandboxError, SandboxTimeout, run_python
 from .state import read_worker_status, write_worker_status
-from .workload import MOD, WORKLOAD, chunk_bounds, normalize_params
+from .workload import (
+    MOD,
+    PYTHON_WORKLOAD,
+    WORKLOAD,
+    chunk_bounds,
+    normalize_params,
+    normalize_python_params,
+)
 
 try:
     import resource
@@ -167,7 +175,17 @@ def _compute_range(seed, start, end, cpu_limit, mem_limit, deadline):
     return total
 
 
-def _submit(client, device_id, task_id, status, result=None, duration_ms=None, error=None, metrics=None):
+def _submit(
+    client,
+    device_id,
+    task_id,
+    status,
+    result=None,
+    duration_ms=None,
+    error=None,
+    metrics=None,
+    stdout=None,
+):
     last_error = None
     for attempt in range(3):
         try:
@@ -179,6 +197,7 @@ def _submit(client, device_id, task_id, status, result=None, duration_ms=None, e
                 duration_ms=duration_ms,
                 error=error,
                 metrics=metrics,
+                stdout=stdout,
             )
         except ApiError as api_error:
             last_error = api_error
@@ -206,9 +225,9 @@ def execute_task(client, config, task):
     sampler = None
 
     try:
-        if task.get("workload") != WORKLOAD:
+        workload = task.get("workload")
+        if workload not in {WORKLOAD, PYTHON_WORKLOAD}:
             raise TaskFailed("unsupported_workload")
-        params = normalize_params(task.get("params"))
         limits = task.get("resource_limits") or {}
         cpu_limit = min(
             _int_setting(limits.get("max_cpu_pct"), 20, 1, 100),
@@ -228,29 +247,53 @@ def execute_task(client, config, task):
 
         sampler = ResourceSampler()
         sampler.start()
+        result = None
+        stdout = None
 
-        seed = params["seed"]
-        iterations = params["iterations"]
-        chunks = params["chunks"]
-        total = 0
-        completed_chunks = 0
-
-        for chunk_index, start, end in chunk_bounds(iterations, chunks):
+        if workload == PYTHON_WORKLOAD:
+            params = normalize_python_params(task.get("params"))
+            max_seconds = _int_setting(limits.get("max_seconds"), 10, 1, 30)
+            try:
+                execution = run_python(
+                    params["code"],
+                    params["args"],
+                    max_seconds=max_seconds,
+                    memory_mb=mem_limit,
+                    cpu_seconds=max(1, min(max_seconds, round(max_seconds * cpu_limit / 100))),
+                )
+            except SandboxTimeout as error:
+                raise TaskFailed("deadline_exceeded") from error
+            except SandboxError as error:
+                raise TaskFailed(str(error)[:200]) from error
             if STOP.is_set():
                 raise TaskAborted("worker_stopped")
-            if _remote_cancelled(client, task_id):
-                raise TaskAborted("cancelled_by_operator")
-            value = _compute_range(
-                seed,
-                start,
-                end,
-                cpu_limit,
-                mem_limit,
-                deadline,
-            )
-            total = (total + value) % MOD
-            completed_chunks += 1
-            LOG.info("task %s chunk %s/%s complete", task_id, completed_chunks, chunks)
+            result = {"value": execution.get("result")}
+            stdout = execution.get("stdout") or None
+        else:
+            params = normalize_params(task.get("params"))
+            seed = params["seed"]
+            iterations = params["iterations"]
+            chunks = params["chunks"]
+            total = 0
+            completed_chunks = 0
+
+            for chunk_index, start, end in chunk_bounds(iterations, chunks):
+                if STOP.is_set():
+                    raise TaskAborted("worker_stopped")
+                if _remote_cancelled(client, task_id):
+                    raise TaskAborted("cancelled_by_operator")
+                value = _compute_range(
+                    seed,
+                    start,
+                    end,
+                    cpu_limit,
+                    mem_limit,
+                    deadline,
+                )
+                total = (total + value) % MOD
+                completed_chunks += 1
+                LOG.info("task %s chunk %s/%s complete", task_id, completed_chunks, chunks)
+            result = {"value": total}
 
         cpu_avg, worker_cpu, load_pct, rss_peak = sampler.finish()
         if rss_peak is not None:
@@ -261,7 +304,7 @@ def execute_task(client, config, task):
             device_id,
             task_id,
             "completed",
-            result={"value": total},
+            result=result,
             duration_ms=duration_ms,
             metrics={
                 "cpu_pct_avg": cpu_avg,
@@ -269,6 +312,7 @@ def execute_task(client, config, task):
                 "worker_cpu_pct_avg": worker_cpu,
                 "rss_mb_peak": round(peak_rss, 1) if peak_rss is not None else None,
             },
+            stdout=stdout,
         )
         verified = response.get("verified")
         _write_status({
@@ -278,7 +322,7 @@ def execute_task(client, config, task):
                 "last_result": {
                     "task_id": task_id,
                     "status": "completed",
-                    "value": total,
+                    "value": result.get("value") if isinstance(result, dict) else result,
                     "verified": verified,
                     "duration_ms": duration_ms,
                     "completed_at": _now(),

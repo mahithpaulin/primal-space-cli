@@ -480,7 +480,7 @@ def run_worker():
             continue
 
         try:
-            claim = client.claim(config["device_id"], True)
+            claim = client.claim(config["device_id"], True, [WORKLOAD, PYTHON_WORKLOAD])
         except ApiError as error:
             LOG.warning("claim failed: %s", error)
             _write_status({

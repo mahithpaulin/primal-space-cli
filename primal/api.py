@@ -94,11 +94,14 @@ class ApiClient:
     def get_device(self, device_id):
         return self.request("GET", f"/api/v1/devices/{device_id}", token=None)
 
-    def claim(self, device_id, compute_enabled):
+    def claim(self, device_id, compute_enabled, workloads=None):
+        payload = {"device_id": device_id, "compute_enabled": compute_enabled}
+        if workloads:
+            payload["workloads"] = list(workloads)
         return self.request(
             "POST",
             "/api/v1/tasks/claim",
-            {"device_id": device_id, "compute_enabled": compute_enabled},
+            payload,
         )
 
     def get_task(self, task_id):

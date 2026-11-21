@@ -1,0 +1,3 @@
+# Primal Space CLI has no third-party Python dependencies.
+# It uses only the Python standard library plus optional Termux:API commands
+# (termux-battery-status, termux-wifi-connectioninfo) provided by the termux-api package.

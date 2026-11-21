@@ -105,8 +105,6 @@ def eligibility(config):
         reasons.append("wifi_required")
 
     battery = battery_info()
-    if config.get("charging_required") and battery.get("charging") is not True:
-        reasons.append("charging_required")
     minimum = _int_setting(config.get("minimum_battery"), 50, 0, 100)
     percentage = battery.get("battery_pct")
     if percentage is None:

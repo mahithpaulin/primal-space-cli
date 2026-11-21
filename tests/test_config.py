@@ -7,8 +7,6 @@ class ConfigTests(unittest.TestCase):
     def test_boolean_parsing(self):
         self.assertTrue(parse_value("compute_enabled", "true"))
         self.assertFalse(parse_value("wifi_only", "0"))
-        with self.assertRaises(ValueError):
-            parse_value("charging_required", "maybe")
 
     def test_integer_parsing(self):
         self.assertEqual(parse_value("maximum_cpu_usage", "20"), 20)

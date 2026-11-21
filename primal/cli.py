@@ -347,8 +347,7 @@ def cmd_worker(args):
             f"cpu<={config.get('maximum_cpu_usage')}% "
             f"ram<={config.get('maximum_memory_usage_mb')}MB "
             f"battery>={config.get('minimum_battery')}% "
-            f"wifi_only={config.get('wifi_only')} "
-            f"charging_required={config.get('charging_required')}"
+            f"wifi_only={config.get('wifi_only')}"
         )
         return 0
 
@@ -432,7 +431,6 @@ def cmd_config(args):
         "maximum_memory_usage_mb",
         "minimum_battery",
         "wifi_only",
-        "charging_required",
     }:
         _heartbeat_now(config, quiet=True)
     return 0

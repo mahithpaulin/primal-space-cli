@@ -20,7 +20,6 @@ DEFAULTS = {
     "enrollment_key": None,
     "compute_enabled": False,
     "wifi_only": True,
-    "charging_required": True,
     "minimum_battery": 50,
     "maximum_cpu_usage": 20,
     "maximum_memory_usage_mb": 128,
@@ -34,7 +33,6 @@ DEFAULTS = {
 BOOL_KEYS = {
     "compute_enabled",
     "wifi_only",
-    "charging_required",
     "worker_paused",
     "cancel_current",
 }

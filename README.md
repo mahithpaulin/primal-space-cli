@@ -73,14 +73,14 @@ background heartbeat daemon. The device appears on the monitor at
 ```text
 compute_enabled = false
 wifi_only = true
-charging_required = true
 minimum_battery = 50
 maximum_cpu_usage = 20
 maximum_memory_usage_mb = 128
 ```
 
 These are conservative targets, not exact Android enforcement guarantees. CPU
-limiting uses process priority (`nice 19`) plus duty cycling. Memory is monitored
+limiting uses process priority (`nice 19`) plus duty cycling. Battery minimum and
+Wi-Fi-only settings are enforced before work. Memory is monitored
 against the configured cap and the task is aborted if exceeded. Workloads are
 small, deterministic, and capped server-side.
 

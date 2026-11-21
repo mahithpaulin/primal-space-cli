@@ -12,6 +12,7 @@ from .state import (
     running_pid,
     write_runtime,
 )
+from .workload import PYTHON_WORKLOAD, WORKLOAD
 
 LOG = logging.getLogger("primal.heartbeat")
 STOP = threading.Event()
@@ -50,7 +51,7 @@ def send_once(config=None, log=None):
     info = device_info(config)
     metrics = collect_metrics(config.get("server_url"))
     worker = _worker_payload(config)
-    response = client.heartbeat(device_id, metrics, worker, info["cli_version"])
+    response = client.heartbeat(device_id, metrics, worker, info["cli_version"], [WORKLOAD, PYTHON_WORKLOAD])
     write_runtime(
         {
             "last_heartbeat_ok": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

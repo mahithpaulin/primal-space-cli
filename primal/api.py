@@ -73,16 +73,19 @@ class ApiClient:
             token=None,
         )
 
-    def heartbeat(self, device_id, metrics, worker, cli_version):
+    def heartbeat(self, device_id, metrics, worker, cli_version, workloads=None):
+        payload = {
+            "device_id": device_id,
+            "metrics": metrics,
+            "worker": worker,
+            "cli_version": cli_version,
+        }
+        if workloads:
+            payload["workloads"] = list(workloads)
         return self.request(
             "POST",
             "/api/v1/heartbeat",
-            {
-                "device_id": device_id,
-                "metrics": metrics,
-                "worker": worker,
-                "cli_version": cli_version,
-            },
+            payload,
         )
 
     def disconnect(self, device_id):

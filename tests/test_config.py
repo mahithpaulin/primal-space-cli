@@ -6,7 +6,6 @@ from primal.config import normalize_server, parse_value
 class ConfigTests(unittest.TestCase):
     def test_boolean_parsing(self):
         self.assertTrue(parse_value("compute_enabled", "true"))
-        self.assertFalse(parse_value("wifi_only", "0"))
 
     def test_integer_parsing(self):
         self.assertEqual(parse_value("maximum_cpu_usage", "20"), 20)

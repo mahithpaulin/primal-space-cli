@@ -101,11 +101,8 @@ def eligibility(config):
     network = network_info(config.get("server_url"))
     if network.get("network_connected") is False:
         reasons.append("network_offline")
-    if config.get("wifi_only") and network.get("network_type") != "wifi":
-        reasons.append("wifi_required")
-
     battery = battery_info()
-    minimum = _int_setting(config.get("minimum_battery"), 50, 0, 100)
+    minimum = _int_setting(config.get("minimum_battery"), 20, 0, 100)
     percentage = battery.get("battery_pct")
     if percentage is None:
         if minimum > 0:

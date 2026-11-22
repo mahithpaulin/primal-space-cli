@@ -4,7 +4,7 @@ import threading
 import time
 
 from .api import ApiClient, ApiError
-from .config import load_config
+from .config import load_config, save_config
 from .device import device_info
 from .resources import collect_metrics
 from .state import (

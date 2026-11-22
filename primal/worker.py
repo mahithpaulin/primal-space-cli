@@ -1,4 +1,4 @@
-import hashlib
+import json
 import logging
 import os
 import signal
@@ -9,15 +9,19 @@ from datetime import datetime, timezone
 from .api import ApiClient, ApiError
 from .config import load_config, save_config
 from .resources import battery_info, cpu_load_pct, cpu_usage_pct, network_info
-from .sandbox import SandboxError, SandboxTimeout, run_python
-from .state import read_worker_status, write_worker_status
+from .sandbox import SandboxError, SandboxTimeout, run_http, run_python, run_shell
+from .state import (
+    inbox_path,
+    message_cursor_path,
+    read_worker_status,
+    write_json,
+    write_worker_status,
+)
 from .workload import (
-    MOD,
-    PYTHON_WORKLOAD,
-    WORKLOAD,
-    chunk_bounds,
-    normalize_params,
+    WORKLOADS,
+    normalize_http_params,
     normalize_python_params,
+    normalize_shell_params,
 )
 
 try:
@@ -139,42 +143,6 @@ def _remote_cancelled(client, task_id):
     return task.get("status") == "cancelled" or task.get("cancel_requested") is True
 
 
-def _compute_range(seed, start, end, cpu_limit, mem_limit, deadline):
-    total = 0
-    batch_start = time.monotonic()
-    batch_iterations = 0
-
-    for index in range(start, end):
-        if STOP.is_set():
-            raise TaskAborted("worker_stopped")
-
-        if index % 1000 == 0:
-            config = load_config()
-            if not config.get("compute_enabled"):
-                raise TaskAborted("compute_disabled")
-            if config.get("cancel_current"):
-                _clear_cancel_flag()
-                raise TaskAborted("cancelled_by_user")
-            if deadline is not None and time.monotonic() > deadline:
-                raise TaskFailed("deadline_exceeded")
-            rss = _rss_mb()
-            if rss is not None and rss > mem_limit:
-                raise TaskFailed("memory_limit_exceeded")
-
-        digest = hashlib.sha256(f"{seed}:{index}".encode("utf-8")).digest()
-        total = (total + int.from_bytes(digest[:8], "big")) % MOD
-        batch_iterations += 1
-
-        if batch_iterations >= 1000:
-            elapsed = time.monotonic() - batch_start
-            if cpu_limit < 100 and elapsed > 0:
-                time.sleep(elapsed * (100 - cpu_limit) / cpu_limit)
-            batch_start = time.monotonic()
-            batch_iterations = 0
-
-    return total
-
-
 def _submit(
     client,
     device_id,
@@ -226,7 +194,7 @@ def execute_task(client, config, task):
 
     try:
         workload = task.get("workload")
-        if workload not in {WORKLOAD, PYTHON_WORKLOAD}:
+        if workload not in WORKLOADS:
             raise TaskFailed("unsupported_workload")
         limits = task.get("resource_limits") or {}
         cpu_limit = min(
@@ -250,13 +218,14 @@ def execute_task(client, config, task):
         result = None
         stdout = None
 
-        if workload == PYTHON_WORKLOAD:
-            params = normalize_python_params(task.get("params"))
+        params = task.get("params") or {}
+        if workload == "python":
+            normalized = normalize_python_params(params)
             max_seconds = _int_setting(limits.get("max_seconds"), 10, 1, 30)
             try:
                 execution = run_python(
-                    params["code"],
-                    params["args"],
+                    normalized["code"],
+                    normalized["args"],
                     max_seconds=max_seconds,
                     memory_mb=mem_limit,
                     cpu_seconds=max(1, min(max_seconds, round(max_seconds * cpu_limit / 100))),
@@ -269,31 +238,49 @@ def execute_task(client, config, task):
                 raise TaskAborted("worker_stopped")
             result = {"value": execution.get("result")}
             stdout = execution.get("stdout") or None
-        else:
-            params = normalize_params(task.get("params"))
-            seed = params["seed"]
-            iterations = params["iterations"]
-            chunks = params["chunks"]
-            total = 0
-            completed_chunks = 0
-
-            for chunk_index, start, end in chunk_bounds(iterations, chunks):
-                if STOP.is_set():
-                    raise TaskAborted("worker_stopped")
-                if _remote_cancelled(client, task_id):
-                    raise TaskAborted("cancelled_by_operator")
-                value = _compute_range(
-                    seed,
-                    start,
-                    end,
-                    cpu_limit,
-                    mem_limit,
-                    deadline,
+        elif workload == "shell":
+            normalized = normalize_shell_params(params)
+            max_seconds = _int_setting(limits.get("max_seconds"), 10, 1, 30)
+            try:
+                execution = run_shell(
+                    normalized["command"],
+                    normalized["items"],
+                    shard_index=_int_setting(params.get("shard_index"), 0, 0, 64),
+                    shard_count=_int_setting(params.get("shard_count"), 1, 1, 64),
+                    max_seconds=max_seconds,
+                    memory_mb=mem_limit,
+                    cpu_seconds=max(1, min(max_seconds, round(max_seconds * cpu_limit / 100))),
                 )
-                total = (total + value) % MOD
-                completed_chunks += 1
-                LOG.info("task %s chunk %s/%s complete", task_id, completed_chunks, chunks)
-            result = {"value": total}
+            except SandboxTimeout as error:
+                raise TaskFailed("deadline_exceeded") from error
+            except SandboxError as error:
+                raise TaskFailed(str(error)[:200]) from error
+            if STOP.is_set():
+                raise TaskAborted("worker_stopped")
+            result = {
+                "value": {
+                    "exit_code": execution["exit_code"],
+                    "stdout": execution["stdout"],
+                    "stderr": execution["stderr"],
+                }
+            }
+            stdout = execution["stdout"] or None
+        else:
+            normalized = normalize_http_params(params)
+            try:
+                execution = run_http(normalized, timeout_s=normalized.get("timeout_s"))
+            except SandboxError as error:
+                raise TaskFailed(str(error)[:200]) from error
+            if STOP.is_set():
+                raise TaskAborted("worker_stopped")
+            result = {
+                "value": {
+                    "status": execution["status"],
+                    "body": execution["body"],
+                    "truncated": execution["truncated"],
+                }
+            }
+            stdout = None
 
         cpu_avg, worker_cpu, load_pct, rss_peak = sampler.finish()
         if rss_peak is not None:
@@ -421,6 +408,37 @@ def execute_task(client, config, task):
             sampler.stop_event.set()
 
 
+def poll_messages(client, config):
+    try:
+        cursor = json.loads(message_cursor_path().read_text()).get("since")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        cursor = None
+    try:
+        payload = client.get_messages(config["device_id"], cursor)
+    except ApiError as error:
+        LOG.debug("message poll failed: %s", error)
+        return
+    messages = payload.get("messages") or []
+    if not messages:
+        return
+    newest = cursor
+    try:
+        with open(inbox_path(), "a", encoding="utf-8") as handle:
+            for message in messages:
+                LOG.info("message from %s: %s", message.get("from"), message.get("body"))
+                handle.write(json.dumps(message, ensure_ascii=False) + "\n")
+                created = message.get("created_at")
+                if created and (newest is None or created > newest):
+                    newest = created
+    except OSError as error:
+        LOG.warning("could not write inbox: %s", error)
+    if newest != cursor:
+        try:
+            write_json(message_cursor_path(), {"since": newest})
+        except OSError as error:
+            LOG.warning("could not save message cursor: %s", error)
+
+
 def run_worker():
     logging.basicConfig(
         level=logging.INFO,
@@ -479,8 +497,10 @@ def run_worker():
             STOP.wait(max(2, int(config.get("poll_interval", 5))))
             continue
 
+        poll_messages(client, config)
+
         try:
-            claim = client.claim(config["device_id"], True, [WORKLOAD, PYTHON_WORKLOAD])
+            claim = client.claim(config["device_id"], True, list(WORKLOADS))
         except ApiError as error:
             LOG.warning("claim failed: %s", error)
             _write_status({

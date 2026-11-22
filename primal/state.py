@@ -34,6 +34,14 @@ def worker_status_path():
     return STATE_DIR / "worker_status.json"
 
 
+def message_cursor_path():
+    return STATE_DIR / "messages.json"
+
+
+def inbox_path():
+    return STATE_DIR / "inbox.jsonl"
+
+
 def _read_pid_file(name):
     try:
         return int(pid_path(name).read_text().strip())

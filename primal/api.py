@@ -1,5 +1,6 @@
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from . import __version__
@@ -135,13 +136,29 @@ class ApiClient:
             payload["stdout"] = stdout
         return self.request("POST", "/api/v1/tasks/result", payload)
 
-    def create_task(self, device_id, params, resource_limits, admin_key):
+    def get_peers(self, device_id):
+        return self.request("GET", f"/api/v1/peers?device_id={urllib.parse.quote(device_id)}")
+
+    def get_messages(self, device_id, since=None):
+        query = f"?device_id={urllib.parse.quote(device_id)}"
+        if since:
+            query += f"&since={urllib.parse.quote(since)}"
+        return self.request("GET", f"/api/v1/messages{query}")
+
+    def send_message(self, device_id, to, body, topic="chat"):
+        return self.request(
+            "POST",
+            "/api/v1/messages",
+            {"device_id": device_id, "to": to, "body": body, "topic": topic},
+        )
+
+    def create_task(self, device_id, workload, params, resource_limits, admin_key):
         return self.request(
             "POST",
             "/api/v1/tasks",
             {
                 "device_id": device_id,
-                "workload": "hash_sum_v1",
+                "workload": workload,
                 "params": params,
                 "resource_limits": resource_limits,
             },

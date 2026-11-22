@@ -98,12 +98,29 @@ Not collected: files, contacts, messages, precise location, SSID/IP/MAC, IMEI,
 serial numbers, Android ID, or other personal identifiers. The install ID is a
 random UUID generated locally and is not derived from hardware.
 
-## Workload
+## Workloads
 
-`hash_sum_v1`: for each independent chunk, sum
-`int(sha256("<seed>:<index>")[:8], "big") mod 1000000007`, then sum chunk values
-mod 1000000007. The monitor recomputes the expected value and verifies the
-device's result. No arbitrary shell or Python execution is supported.
+- `python` — sandboxed Python on CLI devices. Define `main(items)` and return
+  JSON-serializable data. Imports are limited to safe stdlib modules (math, json,
+  hashlib, hmac, base64, random, statistics, datetime, itertools, collections,
+  functools, re, decimal, fractions, struct, uuid, zlib). No file, network, or
+  process access.
+- `shell` — operator-authorized `sh -c` command on CLI devices, CPU/time limited
+  with a 4 MB file cap.
+- `http` — HTTP(S) request from any device (CLI or Android). Useful for inference
+  APIs, webhooks, and remote data checks.
+
+Tasks can be pinned to a device or left unassigned for any eligible device. Jobs
+split a JSON `items` array into parallel shards and reduce results with
+`concat`, `sum`, `count`, or `first`.
+
+Devices can message each other and the operator:
+
+```sh
+primal message send all "hello"
+primal message send Realme\ Narzo\ 50A "status?"
+primal message inbox
+```
 
 ## Security notes
 

@@ -459,6 +459,53 @@ def cmd_disconnect(args):
     return 0
 
 
+def cmd_message_send(args):
+    config = load_config()
+    if not config.get("device_id") or not config.get("token"):
+        print("Device is not registered; run: primal connect")
+        return 1
+    target = None if args.target.lower() in {"all", "*", "broadcast"} else args.target
+    client = _api(config)
+    if target:
+        try:
+            peers = client.get_peers(config["device_id"]).get("peers") or []
+        except ApiError:
+            peers = []
+        matches = [peer for peer in peers if str(peer.get("name", "")).lower() == target.lower()]
+        if matches:
+            target = matches[0]["id"]
+        elif not any(peer.get("id") == target for peer in peers):
+            print(f"Unknown device: {args.target}. Use 'primal status' device ids or 'all'.")
+            return 1
+    try:
+        client.send_message(config["device_id"], target, args.text)
+    except ApiError as error:
+        print(f"Could not send message: {error}")
+        return 1
+    print("Message sent to all devices." if target is None else "Message sent.")
+    return 0
+
+
+def cmd_message_inbox(args):
+    config = load_config()
+    if not config.get("device_id") or not config.get("token"):
+        print("Device is not registered; run: primal connect")
+        return 1
+    try:
+        payload = _api(config).get_messages(config["device_id"])
+    except ApiError as error:
+        print(f"Could not read messages: {error}")
+        return 1
+    messages = payload.get("messages") or []
+    if not messages:
+        print("Inbox is empty.")
+        return 0
+    for message in messages[-max(1, args.limit):]:
+        target = message.get("to") or "all"
+        print(f"{message.get('created_at')}  {message.get('from')} -> {target}: {message.get('body')}")
+    return 0
+
+
 def cmd_logs(args):
     name = args.name
     lines = tail_log(name, args.lines)
@@ -524,6 +571,16 @@ def build_parser():
 
     disconnect_parser = subparsers.add_parser("disconnect", help="stop daemons and mark offline")
     disconnect_parser.set_defaults(func=cmd_disconnect)
+
+    message_parser = subparsers.add_parser("message", help="send or read device messages")
+    message_sub = message_parser.add_subparsers(dest="message_command", required=True)
+    message_send = message_sub.add_parser("send", help="send a message to a device or all devices")
+    message_send.add_argument("target", help="device id, device name, or 'all'")
+    message_send.add_argument("text", help="message body")
+    message_send.set_defaults(func=cmd_message_send)
+    message_inbox = message_sub.add_parser("inbox", help="read recent messages")
+    message_inbox.add_argument("--limit", type=int, default=20)
+    message_inbox.set_defaults(func=cmd_message_inbox)
 
     logs_parser = subparsers.add_parser("logs", help="show daemon logs")
     logs_parser.add_argument("name", choices=["heartbeat", "worker"])

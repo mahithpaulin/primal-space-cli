@@ -288,7 +288,7 @@ def execute_task(client, config, task):
         cpu_avg, worker_cpu, load_pct, rss_peak = sampler.finish()
         duration_ms = round((time.monotonic() - started) * 1000)
         if lending["enabled"]:
-            credits, earned = accrue(config, duration_ms)
+            credits, earned = accrue(config, duration_ms / 1000.0)
             if earned:
                 LOG.info("earned %.4f compute units (balance %.4f)", earned, credits.get("units", 0.0))
         if rss_peak is not None:
@@ -327,6 +327,8 @@ def execute_task(client, config, task):
     except TaskFailed as failed:
         duration_ms = round((time.monotonic() - started) * 1000)
         message = str(failed)[:200]
+        if lending_config(config)["enabled"]:
+            accrue(config, duration_ms / 1000.0, earn_units=False)
         try:
             _submit(
                 client,

@@ -27,6 +27,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import time as _time_module
 import urllib.error
 import urllib.request
 import uuid
@@ -94,6 +95,7 @@ SAFE_MODULES = {
     "string": string,
     "struct": struct,
     "textwrap": textwrap,
+    "time": _time_module,
     "uuid": uuid,
     "zlib": zlib,
 }

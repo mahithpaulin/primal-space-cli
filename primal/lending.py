@@ -76,7 +76,7 @@ def allowance_reached(config, credits, now=None):
     return minutes_used_this_hour(credits, now) >= settings["minutes_per_hour"]
 
 
-def accrue(config, duration_seconds, now=None):
+def accrue(config, duration_seconds, earn_units=True, now=None):
     """Add compute units for compute actually lent, and track the hourly allowance."""
     settings = lending_config(config)
     credits = read_credits()
@@ -90,8 +90,9 @@ def accrue(config, duration_seconds, now=None):
     credits["minutes_used"] = round(float(credits.get("minutes_used") or 0.0) + minutes, 4)
     credits["minutes_used"] = min(credits["minutes_used"], 60.0)
 
-    earned = (duration / HOUR_SECONDS) * settings["units_per_hour"]
+    earned = (duration / HOUR_SECONDS) * settings["units_per_hour"] if earn_units else 0.0
     if earned <= 0:
+        write_credits(credits)
         return credits, 0.0
 
     credits["units"] = round(float(credits.get("units") or 0.0) + earned, 6)
@@ -109,10 +110,17 @@ def accrue(config, duration_seconds, now=None):
 
 def credits_payload(credits=None):
     value = credits if isinstance(credits, dict) else read_credits()
+    window = value.get("window_start")
+    window_iso = None
+    if window:
+        try:
+            window_iso = datetime.fromtimestamp(int(window), timezone.utc).isoformat()
+        except (TypeError, ValueError, OSError):
+            window_iso = None
     return {
         "units": round(float(value.get("units") or 0.0), 6),
         "total_units": round(float(value.get("total_units") or 0.0), 6),
         "minutes_used": round(float(value.get("minutes_used") or 0.0), 4),
-        "window_start": value.get("window_start"),
+        "window_start": window_iso,
         "updated_at": value.get("updated_at"),
     }

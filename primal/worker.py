@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from .api import ApiClient, ApiError
 from .config import load_config, save_config
 from .resources import battery_info, cpu_load_pct, cpu_usage_pct, network_info
+from .lending import accrue, allowance_reached, lending_config, read_credits
 from .sandbox import SandboxError, SandboxTimeout, run_http, run_python, run_shell
 from .state import (
     inbox_path,
@@ -197,9 +198,11 @@ def execute_task(client, config, task):
         if workload not in WORKLOADS:
             raise TaskFailed("unsupported_workload")
         limits = task.get("resource_limits") or {}
+        lending = lending_config(config)
         cpu_limit = min(
             _int_setting(limits.get("max_cpu_pct"), 20, 1, 100),
             _int_setting(config.get("maximum_cpu_usage"), 20, 1, 100),
+            lending["cpu_pct"] if lending["enabled"] else 100,
         )
         mem_limit = min(
             _int_setting(limits.get("max_memory_mb"), 128, 16, 4096),
@@ -283,9 +286,13 @@ def execute_task(client, config, task):
             stdout = None
 
         cpu_avg, worker_cpu, load_pct, rss_peak = sampler.finish()
+        duration_ms = round((time.monotonic() - started) * 1000)
+        if lending["enabled"]:
+            credits, earned = accrue(config, duration_ms)
+            if earned:
+                LOG.info("earned %.4f compute units (balance %.4f)", earned, credits.get("units", 0.0))
         if rss_peak is not None:
             peak_rss = max(peak_rss or 0, rss_peak)
-        duration_ms = round((time.monotonic() - started) * 1000)
         response = _submit(
             client,
             device_id,
@@ -498,6 +505,16 @@ def run_worker():
             continue
 
         poll_messages(client, config)
+
+        if allowance_reached(config, read_credits()):
+            _write_status({
+                    "status": "idle",
+                    "current_task_id": None,
+                    "last_error": "lending_hourly_limit",
+                }
+            )
+            STOP.wait(max(2, int(config.get("poll_interval", 5))))
+            continue
 
         try:
             claim = client.claim(config["device_id"], True, list(WORKLOADS))

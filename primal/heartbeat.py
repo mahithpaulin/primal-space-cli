@@ -12,6 +12,7 @@ from .state import (
     running_pid,
     write_runtime,
 )
+from .lending import credits_payload, lending_config, read_credits
 from .workload import WORKLOADS
 
 LOG = logging.getLogger("primal.heartbeat")
@@ -41,6 +42,26 @@ def _worker_payload(config):
     }
 
 
+def _apply_lending_request(config, response):
+    request = response.get("lending_request")
+    if not isinstance(request, dict):
+        return
+    changed = False
+    wanted = {
+        "lending_enabled": bool(request.get("enabled")),
+        "lend_cpu_pct": int(request.get("cpu_pct") or 20),
+        "lend_minutes_per_hour": int(request.get("minutes_per_hour") or 30),
+        "lend_units_per_hour": float(request.get("units_per_hour") or 1.0),
+    }
+    for key, value in wanted.items():
+        if config.get(key) != value:
+            config[key] = value
+            changed = True
+    if changed:
+        save_config(config)
+        LOG.info("applied operator lending request: %s", wanted)
+
+
 def send_once(config=None, log=None):
     config = config or load_config()
     device_id = config.get("device_id")
@@ -51,7 +72,16 @@ def send_once(config=None, log=None):
     info = device_info(config)
     metrics = collect_metrics(config.get("server_url"))
     worker = _worker_payload(config)
-    response = client.heartbeat(device_id, metrics, worker, info["cli_version"], list(WORKLOADS))
+    response = client.heartbeat(
+        device_id,
+        metrics,
+        worker,
+        info["cli_version"],
+        list(WORKLOADS),
+        credits=credits_payload(read_credits()),
+        lending=lending_config(config),
+    )
+    _apply_lending_request(config, response)
     write_runtime(
         {
             "last_heartbeat_ok": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

@@ -18,6 +18,17 @@ from .config import (
 )
 from .device import device_info
 from .heartbeat import run_heartbeat, send_once
+from .lending import (
+    CREDITS_FILE,
+    DEFAULT_CPU_PCT,
+    DEFAULT_MINUTES_PER_HOUR,
+    DEFAULT_UNITS_PER_HOUR,
+    accrue,
+    allowance_reached,
+    credits_payload,
+    lending_config,
+    read_credits,
+)
 from .resources import discover
 from .state import (
     log_path,
@@ -506,6 +517,52 @@ def cmd_message_inbox(args):
     return 0
 
 
+def cmd_lend(args):
+    config = load_config()
+    settings = lending_config(config)
+    if args.lend_command == "status":
+        credits = read_credits()
+        used = allowance_reached(config, credits)
+        print(f"Active compute: {'ON' if settings['enabled'] else 'OFF'}")
+        print(f"CPU offered: {settings['cpu_pct']}%")
+        print(f"Allowance: {settings['minutes_per_hour']} min/hour")
+        print(f"Rate: {settings['units_per_hour']} unit(s) per hour of compute lent")
+        print(f"Units banked: {credits.get('units', 0.0):.4f} (earned {credits.get('total_units', 0.0):.4f})")
+        print(f"Used this hour: {credits.get('minutes_used', 0.0):.1f} min" + (" · limit reached" if used else ""))
+        return 0
+
+    if args.lend_command == "enable":
+        cpu = args.cpu if args.cpu is not None else settings["cpu_pct"]
+        minutes = args.minutes if args.minutes is not None else settings["minutes_per_hour"]
+        units = args.units_per_hour if args.units_per_hour is not None else settings["units_per_hour"]
+        config["lending_enabled"] = True
+        config["lend_cpu_pct"] = max(1, min(100, int(cpu)))
+        config["lend_minutes_per_hour"] = max(1, min(60, int(minutes)))
+        config["lend_units_per_hour"] = max(0.01, min(100.0, float(units)))
+        save_config(config)
+        print(f"Active compute ON: {config['lend_cpu_pct']}% CPU, {config['lend_minutes_per_hour']} min/hour, {config['lend_units_per_hour']} unit(s)/hour")
+        print("Compute units are stored on this device.")
+        return 0
+
+    config["lending_enabled"] = False
+    save_config(config)
+    print("Active compute OFF. Banked units are kept.")
+    return 0
+
+
+def cmd_credits(args):
+    credits = read_credits()
+    history = credits.get("history") or {}
+    print(f"Compute units banked: {credits.get('units', 0.0):.4f}")
+    print(f"Compute units earned: {credits.get('total_units', 0.0):.4f}")
+    if history:
+        print("Daily:")
+        for day in sorted(history)[-7:]:
+            print(f"  {day}: {history[day]:.4f}")
+    print(f"Stored at: {CREDITS_FILE}")
+    return 0
+
+
 def cmd_logs(args):
     name = args.name
     lines = tail_log(name, args.lines)
@@ -571,6 +628,20 @@ def build_parser():
 
     disconnect_parser = subparsers.add_parser("disconnect", help="stop daemons and mark offline")
     disconnect_parser.set_defaults(func=cmd_disconnect)
+
+    lend_parser = subparsers.add_parser("lend", help="active compute: lend compute and earn units")
+    lend_sub = lend_parser.add_subparsers(dest="lend_command", required=True)
+    lend_status = lend_sub.add_parser("status", help="show lending settings and units")
+    lend_status.set_defaults(func=cmd_lend)
+    lend_enable = lend_sub.add_parser("enable", help="start lending compute")
+    lend_enable.add_argument("--cpu", type=int, help=f"CPU share to offer (1-100, default {DEFAULT_CPU_PCT})")
+    lend_enable.add_argument("--minutes", type=int, help=f"minutes per hour to lend (1-60, default {DEFAULT_MINUTES_PER_HOUR})")
+    lend_enable.add_argument("--units-per-hour", type=float, help=f"units earned per hour of compute (default {DEFAULT_UNITS_PER_HOUR})")
+    lend_enable.set_defaults(func=cmd_lend)
+    lend_disable = lend_sub.add_parser("disable", help="stop lending compute")
+    lend_disable.set_defaults(func=cmd_lend)
+    credits_parser = subparsers.add_parser("credits", help="show compute units banked on this device")
+    credits_parser.set_defaults(func=cmd_credits)
 
     message_parser = subparsers.add_parser("message", help="send or read device messages")
     message_sub = message_parser.add_subparsers(dest="message_command", required=True)

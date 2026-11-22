@@ -33,6 +33,7 @@ BOOL_KEYS = {
     "compute_enabled",
     "worker_paused",
     "cancel_current",
+    "lending_enabled",
 }
 INT_KEYS = {
     "minimum_battery",
@@ -41,6 +42,11 @@ INT_KEYS = {
     "heartbeat_interval",
     "poll_interval",
     "request_timeout",
+    "lend_cpu_pct",
+    "lend_minutes_per_hour",
+}
+FLOAT_KEYS = {
+    "lend_units_per_hour",
 }
 SECRET_KEYS = {"token", "enrollment_key"}
 TEXT_KEYS = {"server_url", "device_name"}
@@ -131,6 +137,11 @@ def parse_value(key, raw):
             return int(raw)
         except (TypeError, ValueError) as error:
             raise ValueError(f"{key} expects an integer") from error
+    if key in FLOAT_KEYS:
+        try:
+            return float(raw)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{key} expects a number") from error
     if key == "server_url":
         return normalize_server(raw)
     if key == "device_name":
@@ -143,7 +154,7 @@ def parse_value(key, raw):
 
 
 def set_config_value(key, raw):
-    allowed = BOOL_KEYS | INT_KEYS | TEXT_KEYS | {"token", "enrollment_key"}
+    allowed = BOOL_KEYS | INT_KEYS | FLOAT_KEYS | TEXT_KEYS | {"token", "enrollment_key"}
     if key not in allowed:
         raise KeyError(key)
     value = parse_value(key, raw)

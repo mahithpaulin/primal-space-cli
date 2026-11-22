@@ -74,7 +74,7 @@ class ApiClient:
             token=None,
         )
 
-    def heartbeat(self, device_id, metrics, worker, cli_version, workloads=None):
+    def heartbeat(self, device_id, metrics, worker, cli_version, workloads=None, credits=None, lending=None):
         payload = {
             "device_id": device_id,
             "metrics": metrics,
@@ -82,12 +82,12 @@ class ApiClient:
             "cli_version": cli_version,
         }
         if workloads:
-            payload["workloads"] = list(workloads)
-        return self.request(
-            "POST",
-            "/api/v1/heartbeat",
-            payload,
-        )
+            payload["workloads"] = workloads
+        if credits:
+            payload["credits"] = credits
+        if lending:
+            payload["lending"] = lending
+        return self.request("POST", "/api/v1/heartbeat", payload)
 
     def disconnect(self, device_id):
         return self.request("POST", "/api/v1/disconnect", {"device_id": device_id})

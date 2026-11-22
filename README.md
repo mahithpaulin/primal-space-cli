@@ -37,7 +37,7 @@ bash install-termux.sh
 ## Quick start
 
 ```sh
-primal init --server https://primal-space-monitor.vercel.app --enrollment-key "<key>"
+primal init --server https://primalmonitor.vercel.app --enrollment-key "<key>"
 primal discover
 primal connect
 primal status
@@ -45,7 +45,7 @@ primal status
 
 `primal connect` registers the device (once), sends a heartbeat, and starts a
 background heartbeat daemon. The device appears on the monitor at
-`https://primal-space-monitor.vercel.app/`.
+`https://primalmonitor.vercel.app/`.
 
 ## Commands
 

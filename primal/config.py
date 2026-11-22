@@ -5,7 +5,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-DEFAULT_SERVER = "https://primal-space-monitor.vercel.app"
+DEFAULT_SERVER = "https://primalmonitor.vercel.app"
 
 APP_DIR = Path(os.environ.get("PRIMAL_CONFIG_HOME", Path.home() / ".config" / "primal"))
 STATE_DIR = Path(os.environ.get("PRIMAL_STATE_HOME", Path.home() / ".local" / "state" / "primal"))

@@ -10,7 +10,8 @@ from .api import ApiClient, ApiError
 from .config import load_config, save_config
 from .resources import battery_info, cpu_load_pct, cpu_usage_pct, network_info
 from .lending import accrue, allowance_reached, lending_config, read_credits
-from .sandbox import SandboxError, SandboxTimeout, run_http, run_python, run_shell
+from .wallet import accrue_wallet, apply_credit, cap_reached, read_wallet, roll_periods
+from .sandbox import SandboxError, SandboxTimeout, run_http, run_python, run_shell, children_cpu_seconds
 from .state import (
     inbox_path,
     message_cursor_path,
@@ -180,6 +181,8 @@ def execute_task(client, config, task):
     device_id = config["device_id"]
     task_id = task["id"]
     started = time.monotonic()
+    cpu_started = time.process_time()
+    child_cpu_started = children_cpu_seconds()
     started_at = _now()
     peak_rss = _rss_mb()
     _write_status({
@@ -287,10 +290,25 @@ def execute_task(client, config, task):
 
         cpu_avg, worker_cpu, load_pct, rss_peak = sampler.finish()
         duration_ms = round((time.monotonic() - started) * 1000)
+        cpu_ratio = None
+        wall_seconds = max(0.001, time.monotonic() - started)
+        parent_cpu = max(0.0, time.process_time() - cpu_started)
+        child_cpu = None
+        child_cpu_now = children_cpu_seconds()
+        if child_cpu_started is not None and child_cpu_now is not None:
+            child_cpu = max(0.0, child_cpu_now - child_cpu_started)
+        cpu_seconds = max(parent_cpu, child_cpu or 0.0)
+        cpu_ratio = min(1.0, cpu_seconds / wall_seconds)
         if lending["enabled"]:
             credits, earned = accrue(config, duration_ms / 1000.0)
+            wallet, wallet_earned = accrue_wallet(config, duration_ms / 1000.0, cpu_ratio=cpu_ratio)
             if earned:
-                LOG.info("earned %.4f compute units (balance %.4f)", earned, credits.get("units", 0.0))
+                LOG.info(
+                    "earned %.4f compute units (balance %.4f CU, cpu ratio %s)",
+                    earned,
+                    credits.get("units", 0.0),
+                    round(cpu_ratio, 3) if cpu_ratio is not None else "unknown",
+                )
         if rss_peak is not None:
             peak_rss = max(peak_rss or 0, rss_peak)
         response = _submit(
@@ -436,6 +454,11 @@ def poll_messages(client, config):
             for message in messages:
                 LOG.info("message from %s: %s", message.get("from"), message.get("body"))
                 handle.write(json.dumps(message, ensure_ascii=False) + "\n")
+                credit = message.get("credit")
+                if isinstance(credit, dict):
+                    wallet, delta = apply_credit(read_wallet(), credit)
+                    if delta:
+                        LOG.info("wallet updated: %s %.4f CU (balance %.4f)", credit.get("kind"), delta, wallet.get("balance", 0.0))
                 created = message.get("created_at")
                 if created and (newest is None or created > newest):
                     newest = created
@@ -486,7 +509,8 @@ def run_worker():
 
     while not STOP.is_set():
         config = load_config()
-        if not config.get("compute_enabled"):
+        mode = config.get("compute_mode") or "off"
+        if mode == "off" or not config.get("compute_enabled"):
             _write_status({"status": "disabled", "current_task_id": None})
             STOP.wait(max(2, int(config.get("poll_interval", 5))))
             continue
@@ -507,6 +531,17 @@ def run_worker():
             continue
 
         poll_messages(client, config)
+
+        cap = cap_reached(config, roll_periods(read_wallet()))
+        if cap:
+            _write_status({
+                    "status": "idle",
+                    "current_task_id": None,
+                    "last_error": cap,
+                }
+            )
+            STOP.wait(max(2, int(config.get("poll_interval", 5))))
+            continue
 
         if allowance_reached(config, read_credits()):
             _write_status({

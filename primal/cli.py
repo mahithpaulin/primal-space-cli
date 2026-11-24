@@ -18,6 +18,15 @@ from .config import (
 )
 from .device import device_info
 from .heartbeat import run_heartbeat, send_once
+from .wallet import (
+    WALLET_FILE,
+    caps as compute_caps,
+    caps_payload,
+    cap_reached,
+    read_wallet,
+    roll_periods,
+    wallet_payload,
+)
 from .lending import (
     CREDITS_FILE,
     DEFAULT_CPU_PCT,
@@ -205,9 +214,25 @@ def cmd_discover(args):
     return 0
 
 
+def _apply_compute_mode(config):
+    mode = config.get("compute_mode") or "off"
+    if mode == "lend":
+        if config.get("auto_lend_on_start", True):
+            config["lending_enabled"] = True
+            config["compute_enabled"] = True
+    elif mode == "ondemand":
+        config["lending_enabled"] = False
+    else:
+        config["lending_enabled"] = False
+        config["compute_enabled"] = False
+    save_config(config)
+    return config
+
+
 def cmd_connect(args):
     config = load_config()
     config = _ensure_registered(config)
+    config = _apply_compute_mode(config)
     _heartbeat_now(config)
     if args.foreground:
         print("Running heartbeat in the foreground. Ctrl-C to stop.")
@@ -215,6 +240,8 @@ def cmd_connect(args):
         return 0
     pid = _ensure_heartbeat(config)
     print(f"Heartbeat running (pid {pid})")
+    if (config.get("compute_mode") or "off") == "lend" and config.get("auto_lend_on_start", True):
+        print("Active compute: lending is enabled for this session.")
     print(DASHBOARD_HINT.format(server=config["server_url"]))
     return 0
 
@@ -343,6 +370,9 @@ def cmd_worker(args):
     config = load_config()
 
     if action == "start":
+        mode = config.get("compute_mode") or "off"
+        if mode == "off":
+            raise RuntimeError("compute mode is off; set it with: primal settings mode ondemand|lend")
         if not config.get("compute_enabled"):
             raise RuntimeError("compute is disabled; enable explicitly with: primal compute enable")
         if not config.get("device_id") or not config.get("token"):
@@ -563,6 +593,137 @@ def cmd_credits(args):
     return 0
 
 
+def cmd_wallet(args):
+    config = load_config()
+    wallet = roll_periods(read_wallet())
+    payload = wallet_payload(wallet)
+    usage = caps_payload(config, wallet)
+    limits = compute_caps(config)
+    print(f"Balance: {payload['balance']:.4f} CU")
+    print(f"Earned: {payload['earned_total']:.4f} CU · sent: {payload['spent_total']:.4f} CU")
+    if limits["day_minutes"] or limits["week_minutes"] or limits["month_minutes"]:
+        print(
+            f"Compute caps: day {usage['day_used']:.0f}/{limits['day_minutes'] or '∞'}m · "
+            f"week {usage['week_used']:.0f}/{limits['week_minutes'] or '∞'}m · "
+            f"month {usage['month_used']:.0f}/{limits['month_minutes'] or '∞'}m"
+        )
+    else:
+        print("Compute caps: unlimited")
+    history = wallet.get("history") or []
+    if history and args.history:
+        print("Recent activity:")
+        for entry in history[-args.history:]:
+            print(f"  {entry.get('at')} {entry.get('kind')} {entry.get('amount')} CU → balance {entry.get('balance')}")
+    print(f"Stored at: {WALLET_FILE}")
+    return 0
+
+
+def cmd_profile(args):
+    config = load_config()
+    if args.profile_command == "show":
+        print(f"Name: {config.get('profile_name') or '(device name) ' + str(config.get('device_name'))}")
+        print(f"Status: {config.get('profile_status') or '-'}")
+        print(f"Avatar: {config.get('profile_avatar') or '-'}")
+        return 0
+    if args.name is not None:
+        config["profile_name"] = args.name[:48]
+    if args.status is not None:
+        config["profile_status"] = args.status[:120]
+    if args.avatar is not None:
+        config["profile_avatar"] = args.avatar[:8]
+    save_config(config)
+    print("Profile updated.")
+    return 0
+
+
+def cmd_settings(args):
+    config = load_config()
+    mode = config.get("compute_mode") or "off"
+    if args.settings_command == "show":
+        usage = caps_payload(config)
+        limits = compute_caps(config)
+        print(f"Compute mode: {mode}")
+        print(f"Auto-start lending on connect: {'yes' if config.get('auto_lend_on_start') else 'no'}")
+        print(f"Lending: {settings_line(config)}")
+        print(
+            f"Caps: day {limits['day_minutes'] or '∞'}m · week {limits['week_minutes'] or '∞'}m · month {limits['month_minutes'] or '∞'}m"
+        )
+        print(f"Used: day {usage['day_used']:.0f}m · week {usage['week_used']:.0f}m · month {usage['month_used']:.0f}m")
+        blocked = cap_reached(config, roll_periods(read_wallet()))
+        print(f"Status: {blocked or 'within limits'}")
+        return 0
+
+    if args.settings_command == "mode":
+        config["compute_mode"] = args.mode
+        if args.mode == "lend":
+            config["lending_enabled"] = True
+            config["compute_enabled"] = True
+        elif args.mode == "off":
+            config["lending_enabled"] = False
+            config["compute_enabled"] = False
+        save_config(config)
+        print(f"Compute mode set to {args.mode}.")
+        return 0
+
+    if args.settings_command == "auto":
+        config["auto_lend_on_start"] = args.enabled
+        save_config(config)
+        print(f"Auto-start lending on connect: {'yes' if args.enabled else 'no'}")
+        return 0
+
+    if args.settings_command == "caps":
+        if args.day is not None:
+            config["max_compute_minutes_day"] = max(0, int(args.day))
+        if args.week is not None:
+            config["max_compute_minutes_week"] = max(0, int(args.week))
+        if args.month is not None:
+            config["max_compute_minutes_month"] = max(0, int(args.month))
+        save_config(config)
+        print("Compute caps updated.")
+        return 0
+    return 0
+
+
+def settings_line(config):
+    from .lending import lending_config
+
+    lending = lending_config(config)
+    return (
+        f"{'on' if lending['enabled'] else 'off'} · {lending['cpu_pct']}% CPU · "
+        f"{lending['minutes_per_hour']} min/hour · {lending['units_per_hour']} unit(s)/hour"
+    )
+
+
+def cmd_message_threads(args):
+    config = load_config()
+    if not config.get("device_id") or not config.get("token"):
+        print("Device is not registered; run: primal connect")
+        return 1
+    try:
+        payload = _api(config).get_messages(config["device_id"])
+    except ApiError as error:
+        print(f"Could not read messages: {error}")
+        return 1
+    messages = payload.get("messages") or []
+    if not messages:
+        print("No conversations yet.")
+        return 0
+    threads = {}
+    for message in messages:
+        peer = message.get("from") if message.get("from") != config.get("device_id") else message.get("to")
+        peer = peer or "broadcast"
+        threads.setdefault(peer, []).append(message)
+    try:
+        peers = {peer.get("id"): peer for peer in (_api(config).get_peers(config["device_id"]).get("peers") or [])}
+    except ApiError:
+        peers = {}
+    for peer, items in sorted(threads.items()):
+        label = peers.get(peer, {}).get("name") or ("all devices" if peer == "broadcast" else peer[:8])
+        last = items[-1]
+        print(f"{label}: {len(items)} message(s) · last: {last.get('body')[:80]}")
+    return 0
+
+
 def cmd_logs(args):
     name = args.name
     lines = tail_log(name, args.lines)
@@ -629,6 +790,36 @@ def build_parser():
     disconnect_parser = subparsers.add_parser("disconnect", help="stop daemons and mark offline")
     disconnect_parser.set_defaults(func=cmd_disconnect)
 
+    wallet_parser = subparsers.add_parser("wallet", help="show compute currency balance and caps")
+    wallet_parser.add_argument("--history", type=int, default=0, help="show recent wallet activity")
+    wallet_parser.set_defaults(func=cmd_wallet)
+
+    profile_parser = subparsers.add_parser("profile", help="set your profile shown to other devices")
+    profile_sub = profile_parser.add_subparsers(dest="profile_command", required=True)
+    profile_show = profile_sub.add_parser("show")
+    profile_show.set_defaults(func=cmd_profile)
+    profile_set = profile_sub.add_parser("set")
+    profile_set.add_argument("--name")
+    profile_set.add_argument("--status")
+    profile_set.add_argument("--avatar")
+    profile_set.set_defaults(func=cmd_profile)
+
+    settings_parser = subparsers.add_parser("settings", help="compute mode, caps and behaviour")
+    settings_sub = settings_parser.add_subparsers(dest="settings_command", required=True)
+    settings_show = settings_sub.add_parser("show")
+    settings_show.set_defaults(func=cmd_settings)
+    settings_mode = settings_sub.add_parser("mode", help="off | ondemand | lend")
+    settings_mode.add_argument("mode", choices=["off", "ondemand", "lend"])
+    settings_mode.set_defaults(func=cmd_settings)
+    settings_auto = settings_sub.add_parser("auto", help="start lending automatically when the daemon starts")
+    settings_auto.add_argument("enabled", choices=["on", "off"])
+    settings_auto.set_defaults(func=cmd_settings)
+    settings_caps = settings_sub.add_parser("caps", help="maximum compute per day, week and month (minutes)")
+    settings_caps.add_argument("--day", type=int)
+    settings_caps.add_argument("--week", type=int)
+    settings_caps.add_argument("--month", type=int)
+    settings_caps.set_defaults(func=cmd_settings)
+
     lend_parser = subparsers.add_parser("lend", help="active compute: lend compute and earn units")
     lend_sub = lend_parser.add_subparsers(dest="lend_command", required=True)
     lend_status = lend_sub.add_parser("status", help="show lending settings and units")
@@ -652,6 +843,8 @@ def build_parser():
     message_inbox = message_sub.add_parser("inbox", help="read recent messages")
     message_inbox.add_argument("--limit", type=int, default=20)
     message_inbox.set_defaults(func=cmd_message_inbox)
+    message_threads = message_sub.add_parser("threads", help="list conversations")
+    message_threads.set_defaults(func=cmd_message_threads)
 
     logs_parser = subparsers.add_parser("logs", help="show daemon logs")
     logs_parser.add_argument("name", choices=["heartbeat", "worker"])

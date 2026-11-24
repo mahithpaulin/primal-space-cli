@@ -13,6 +13,7 @@ from .state import (
     write_runtime,
 )
 from .lending import credits_payload, lending_config, read_credits
+from .wallet import caps_payload, wallet_payload
 from .workload import WORKLOADS
 
 LOG = logging.getLogger("primal.heartbeat")
@@ -80,6 +81,13 @@ def send_once(config=None, log=None):
         list(WORKLOADS),
         credits=credits_payload(read_credits()),
         lending=lending_config(config),
+        profile={
+            "name": config.get("profile_name") or "",
+            "status": config.get("profile_status") or "",
+            "avatar": config.get("profile_avatar") or "",
+        },
+        wallet=wallet_payload(),
+        caps=caps_payload(config),
     )
     _apply_lending_request(config, response)
     write_runtime(

@@ -27,6 +27,14 @@ DEFAULTS = {
     "heartbeat_interval": 30,
     "poll_interval": 5,
     "request_timeout": 20,
+    "compute_mode": "off",
+    "auto_lend_on_start": True,
+    "max_compute_minutes_day": 0,
+    "max_compute_minutes_week": 0,
+    "max_compute_minutes_month": 0,
+    "profile_name": "",
+    "profile_status": "",
+    "profile_avatar": "",
 }
 
 BOOL_KEYS = {
@@ -34,6 +42,7 @@ BOOL_KEYS = {
     "worker_paused",
     "cancel_current",
     "lending_enabled",
+    "auto_lend_on_start",
 }
 INT_KEYS = {
     "minimum_battery",
@@ -44,12 +53,15 @@ INT_KEYS = {
     "request_timeout",
     "lend_cpu_pct",
     "lend_minutes_per_hour",
+    "max_compute_minutes_day",
+    "max_compute_minutes_week",
+    "max_compute_minutes_month",
 }
 FLOAT_KEYS = {
     "lend_units_per_hour",
 }
 SECRET_KEYS = {"token", "enrollment_key"}
-TEXT_KEYS = {"server_url", "device_name"}
+TEXT_KEYS = {"server_url", "device_name", "compute_mode", "profile_name", "profile_status", "profile_avatar"}
 
 
 def ensure_dirs():
@@ -146,6 +158,17 @@ def parse_value(key, raw):
         return normalize_server(raw)
     if key == "device_name":
         return str(raw).strip()[:64]
+    if key == "compute_mode":
+        value = str(raw).strip().lower()
+        if value not in {"off", "ondemand", "lend"}:
+            raise ValueError("compute_mode expects off, ondemand or lend")
+        return value
+    if key == "profile_name":
+        return str(raw).strip()[:48]
+    if key == "profile_status":
+        return str(raw).strip()[:120]
+    if key == "profile_avatar":
+        return str(raw).strip()[:8]
     if key == "enrollment_key":
         return str(raw).strip()
     if key == "token":

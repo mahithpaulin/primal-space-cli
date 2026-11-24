@@ -365,6 +365,15 @@ def _terminate(process):
             pass
 
 
+def children_cpu_seconds():
+    """CPU seconds consumed by finished child processes (sandbox workloads)."""
+    try:
+        usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+        return float(usage.ru_utime) + float(usage.ru_stime)
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
 def run_python(code, args=None, max_seconds=10, memory_mb=128, cpu_seconds=None):
     validate_code(code)
     _validate_json_size(args, MAX_ARGS_BYTES, "args")

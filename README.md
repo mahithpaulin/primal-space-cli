@@ -63,6 +63,15 @@ background heartbeat daemon. The device appears on the monitor at
 | `primal worker pause` | Stop claiming new tasks (current task continues) |
 | `primal worker resume` | Resume claiming tasks |
 | `primal worker cancel` | Abort the current task without stopping the worker |
+| `primal settings show` | Show compute mode, caps and lending status |
+| `primal settings mode off\|ondemand\|lend` | Set the compute mode |
+| `primal settings auto on\|off` | Start lending automatically when the daemon starts |
+| `primal settings caps --day N --week N --month N` | Maximum compute minutes per period (0 = unlimited) |
+| `primal profile set --name NAME --status TEXT --avatar EMOJI` | Set the profile other devices see |
+| `primal profile show` | Show the current profile |
+| `primal wallet [--history N]` | Compute-unit balance, earnings and cap usage |
+| `primal credits` | Compute units banked by the lending ledger |
+| `primal lend status\|enable\|disable` | Active-compute lending control |
 | `primal config show` | Show contribution settings |
 | `primal config set KEY VALUE` | Change a setting |
 | `primal disconnect` | Stop daemons and mark the device offline |
@@ -120,7 +129,24 @@ Devices can message each other and the operator:
 primal message send all "hello"
 primal message send Realme\ Narzo\ 50A "status?"
 primal message inbox
+primal message threads
 ```
+
+Compute modes control how a device participates:
+
+| Mode | Behaviour |
+| --- | --- |
+| `off` | Never claims work; the worker refuses to start |
+| `ondemand` | Claims work only when explicitly enabled |
+| `lend` | Lends a CPU slice and earns compute units (CU) |
+
+One hour of compute lent earns one CU. Earnings are weighted by measured CPU
+time and capped at the promised CPU share. CU balances live on the device and
+can be transferred peer-to-peer by the operator; the server keeps the matching
+ledger, and both sides are notified over the message bus.
+
+Day/week/month caps stop the worker from claiming once the configured compute
+minutes for a period are used up.
 
 ## Security notes
 

@@ -583,6 +583,8 @@ def cmd_lend(args):
 def cmd_credits(args):
     credits = read_credits()
     history = credits.get("history") or {}
+    wallet = read_wallet()
+    print(f"Wallet balance: {wallet.get('balance', 0.0):.4f} CU (sent {wallet.get('spent_total', 0.0):.4f})")
     print(f"Compute units banked: {credits.get('units', 0.0):.4f}")
     print(f"Compute units earned: {credits.get('total_units', 0.0):.4f}")
     if history:

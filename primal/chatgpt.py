@@ -289,7 +289,7 @@ def _wait_for_callback(server, expected_state, timeout=300):
     raise OAuthError("timed out waiting for the browser sign-in")
 
 
-def login(agent_name="PrimalSpace", open_browser=True, timeout=300, on_url=None):
+def login(agent_name="PrimalSpace", open_browser=True, timeout=900, on_url=None):
     """Run the SIWC flow and return the stored credential record."""
     saved = read_credentials() or {}
     client_id = saved.get("client_id")

@@ -1,16 +1,16 @@
-# Primal Space CLI
+# Primal Space
 
-Command-line client for the Primal Space experiment. Runs on Android/Termux,
-discovers real device resources, maintains an authenticated heartbeat to the
-Primal Space Monitor, and executes only an allow-listed deterministic benchmark
-when the user explicitly enables compute.
+Compute node and desktop app for the Primal Space network. Runs on Android/Termux,
+Windows, macOS and Linux, discovers real device resources, maintains an
+authenticated heartbeat to the Primal Space Monitor, and executes only
+allow-listed workloads when the user explicitly enables compute.
 
 ## Requirements
 
-- Android ARM64 (tested on Realme RMX3430 / Android 13)
-- Termux with Python 3.9+
+- Android ARM64 (tested on Realme RMX3430 / Android 13) with Termux and Python 3.9+
+- Windows 10/11, macOS 12+ or Linux with Python 3.9+ (or the packaged binaries)
 - Termux:API companion app and `termux-api` package for battery/Wi-Fi readings
-  (optional; `/proc` and `/sys` fallbacks are used when unavailable)
+  (optional; `/proc`, `/sys` and platform fallbacks are used when unavailable)
 - No third-party Python dependencies
 
 ## Install on Termux
@@ -33,6 +33,48 @@ git clone https://github.com/mahithpaulin/primal-space-cli.git
 cd primal-space-cli
 bash install-termux.sh
 ```
+
+## Desktop app (Windows, macOS, Linux)
+
+Download the standalone binary for your platform from the latest `desktop-v*`
+GitHub release:
+
+| Platform | Asset |
+| --- | --- |
+| Windows x64 | `primal-space-windows-x64.exe` |
+| macOS Intel | `primal-space-macos-x64` |
+| macOS Apple Silicon | `primal-space-macos-arm64` |
+| Linux x64 | `primal-space-linux-x64` |
+
+Each release ships a `.sha256` file next to the binary. The same binary works as
+the CLI (`primal-space status`) and as the windowed app (`primal-space` with no
+arguments).
+
+macOS may quarantine an unsigned download; allow it once with:
+
+```sh
+xattr -d com.apple.quarantine ./primal-space-macos-arm64
+chmod +x ./primal-space-macos-arm64
+```
+
+From source instead:
+
+```sh
+python -m pip install --no-build-isolation .
+primal desktop
+```
+
+The desktop window manages the same daemons as the CLI: connect/disconnect,
+worker start/stop/pause/resume, compute mode, caps, profile, wallet summary,
+messages and log tails. Settings are stored per platform:
+
+- Windows: `%APPDATA%\primal\config.json`
+- macOS: `~/Library/Application Support/primal/config.json`
+- Linux/Termux: `~/.config/primal/config.json`
+
+Binaries are built by `.github/workflows/build-desktop.yml` (PyInstaller on
+`ubuntu-latest`, `windows-latest`, `macos-13` and `macos-14`). Tag `desktop-v*`
+to publish a release.
 
 ## Quick start
 
@@ -76,6 +118,7 @@ background heartbeat daemon. The device appears on the monitor at
 | `primal config set KEY VALUE` | Change a setting |
 | `primal disconnect` | Stop daemons and mark the device offline |
 | `primal logs heartbeat\|worker` | Show recent daemon logs |
+| `primal desktop` | Open the desktop window (Windows, macOS, Linux) |
 
 ## Default contribution settings
 

@@ -736,10 +736,26 @@ def cmd_logs(args):
     return 0
 
 
+def cmd_desktop(_args):
+    try:
+        from .desktop import main as desktop_main
+    except ImportError as error:
+        raise RuntimeError(
+            "the desktop window needs tkinter; install python3-tk or use the packaged binary"
+        ) from error
+    return desktop_main()
+
+
+def cmd_sandbox_child(args):
+    from .sandbox import child_main
+
+    return child_main(args.payload)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="primal",
-        description="Primal Space CLI for Android/Termux devices",
+        description="Primal Space compute node for Android/Termux, Windows, macOS and Linux",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -853,8 +869,16 @@ def build_parser():
     logs_parser.add_argument("--lines", type=int, default=30)
     logs_parser.set_defaults(func=cmd_logs)
 
+    desktop_parser = subparsers.add_parser(
+        "desktop", help="open the PrimalSpace desktop window (Windows, macOS, Linux)"
+    )
+    desktop_parser.set_defaults(func=cmd_desktop)
+
     subparsers.add_parser("_heartbeat", help=argparse.SUPPRESS).set_defaults(func=lambda _args: run_heartbeat())
     subparsers.add_parser("_worker", help=argparse.SUPPRESS).set_defaults(func=lambda _args: run_worker())
+    sandbox_parser = subparsers.add_parser("_sandbox", help=argparse.SUPPRESS)
+    sandbox_parser.add_argument("payload")
+    sandbox_parser.set_defaults(func=cmd_sandbox_child)
 
     return parser
 

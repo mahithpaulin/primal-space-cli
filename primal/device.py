@@ -27,6 +27,14 @@ def getprop(name):
     return value or None
 
 
+def _desktop_default_name():
+    return {
+        "Windows": "Windows device",
+        "Darwin": "macOS device",
+        "Linux": "Linux device",
+    }.get(platform.system(), "PrimalSpace device")
+
+
 def cpu_cores():
     try:
         affinity = os.sched_getaffinity(0)
@@ -50,7 +58,12 @@ def device_info(config=None):
     except ValueError:
         android_sdk = None
 
-    default_name = " ".join(part for part in (manufacturer, model) if part) or "Android device"
+    if android_version or manufacturer or model:
+        default_name = " ".join(part for part in (manufacturer, model) if part) or "Android device"
+    else:
+        manufacturer = platform.system() or "Desktop"
+        model = platform.release() or None
+        default_name = _desktop_default_name()
     name = (config.get("device_name") or default_name).strip()[:64]
 
     return {

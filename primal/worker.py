@@ -118,10 +118,7 @@ def eligibility(config):
     battery = battery_info()
     minimum = _int_setting(config.get("minimum_battery"), 20, 0, 100)
     percentage = battery.get("battery_pct")
-    if percentage is None:
-        if minimum > 0:
-            reasons.append("battery_unavailable")
-    elif percentage < minimum:
+    if percentage is not None and percentage < minimum:
         reasons.append("battery_below_minimum")
     return reasons, network, battery
 

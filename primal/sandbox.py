@@ -39,6 +39,8 @@ try:
 except ImportError:
     resource = None
 
+IS_WINDOWS = sys.platform == "win32"
+
 MAX_CODE_BYTES = 65536
 MAX_ARGS_BYTES = 8192
 MAX_OUTPUT_BYTES = 65536
@@ -287,6 +289,20 @@ def _alarm_handler(_signum, _frame):
     raise SandboxTimeout("execution timed out")
 
 
+def _install_timeout(max_seconds):
+    if hasattr(signal, "SIGALRM") and hasattr(signal, "alarm"):
+        signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(max_seconds)
+        return None
+    import threading
+    import _thread
+
+    timer = threading.Timer(max_seconds, _thread.interrupt_main)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 def _child_payload(payload_path):
     with open(payload_path, encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -311,11 +327,11 @@ def child_main(payload_path):
     sys.stdout = output
     sys.stderr = error_output
     response = None
+    timer = None
     try:
         validate_code(code)
         _apply_limits(cpu_seconds, memory_mb)
-        signal.signal(signal.SIGALRM, _alarm_handler)
-        signal.alarm(max_seconds)
+        timer = _install_timeout(max_seconds)
         namespace = {"__builtins__": SAFE_BUILTINS, "math": SAFE_MATH}
         exec(compile(code, "<primal>", "exec"), namespace, namespace)
         function = namespace.get("main")
@@ -334,6 +350,14 @@ def child_main(payload_path):
             "stdout": _clip(output.getvalue(), MAX_OUTPUT_BYTES),
             "stderr": _clip(error_output.getvalue(), MAX_OUTPUT_BYTES),
         }
+    except KeyboardInterrupt:
+        response = {
+            "ok": False,
+            "timeout": True,
+            "error": "execution timed out",
+            "stdout": _clip(output.getvalue(), MAX_OUTPUT_BYTES),
+            "stderr": _clip(error_output.getvalue(), MAX_OUTPUT_BYTES),
+        }
     except BaseException as error:
         response = {
             "ok": False,
@@ -343,7 +367,10 @@ def child_main(payload_path):
             "stderr": _clip(error_output.getvalue(), MAX_OUTPUT_BYTES),
         }
     finally:
-        signal.alarm(0)
+        if timer is not None:
+            timer.cancel()
+        if hasattr(signal, "alarm"):
+            signal.alarm(0)
         sys.stdout = real_stdout
         sys.stderr = real_stderr
     sys.stdout.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")))
@@ -393,8 +420,17 @@ def run_python(code, args=None, max_seconds=10, memory_mb=128, cpu_seconds=None)
         os.chmod(payload_path, 0o600)
         with open(payload_path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+        if getattr(sys, "frozen", False):
+            command = [sys.executable, "_sandbox", payload_path]
+        else:
+            command = [
+                sys.executable,
+                "-c",
+                "from primal.sandbox import child_main; raise SystemExit(child_main(__import__('sys').argv[1]))",
+                payload_path,
+            ]
         process = subprocess.Popen(
-            [sys.executable, "-c", "from primal.sandbox import child_main; raise SystemExit(child_main(__import__('sys').argv[1]))", payload_path],
+            command,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -451,10 +487,11 @@ def _apply_shell_limits(cpu_seconds, memory_mb):
         resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
     except (OSError, ValueError):
         pass
-    try:
-        os.setsid()
-    except OSError:
-        pass
+    if hasattr(os, "setsid"):
+        try:
+            os.setsid()
+        except OSError:
+            pass
 
 
 def run_shell(command, items=None, shard_index=0, shard_count=1, max_seconds=10, memory_mb=128, cpu_seconds=None):
@@ -469,30 +506,45 @@ def run_shell(command, items=None, shard_index=0, shard_count=1, max_seconds=10,
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="primal-shell-") as workdir:
         environment = {
-            "PATH": os.environ.get("PATH", "/system/bin:/usr/bin:/bin"),
+            "PATH": os.environ.get("PATH", os.defpath),
             "HOME": workdir,
+            "USERPROFILE": workdir,
             "TMPDIR": workdir,
+            "TEMP": workdir,
+            "TMP": workdir,
             "LANG": "C.UTF-8",
             "PRIMAL_ITEMS": json.dumps(items, ensure_ascii=False, separators=(",", ":")),
             "PRIMAL_SHARD_INDEX": str(int(shard_index)),
             "PRIMAL_SHARD_COUNT": str(int(shard_count)),
         }
+        if IS_WINDOWS:
+            environment["SystemRoot"] = os.environ.get("SystemRoot", r"C:\Windows")
+            environment["ComSpec"] = os.environ.get("ComSpec", r"C:\Windows\System32\cmd.exe")
+            shell_command = ["cmd.exe", "/d", "/s", "/c", command]
+        else:
+            shell_command = ["sh", "-c", command]
+        options = {}
+        if os.name == "posix":
+            options["preexec_fn"] = lambda: _apply_shell_limits(cpu_seconds, memory_mb)
         process = subprocess.Popen(
-            ["sh", "-c", command],
+            shell_command,
             cwd=workdir,
             env=environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             close_fds=True,
-            preexec_fn=lambda: _apply_shell_limits(cpu_seconds, memory_mb),
+            **options,
         )
         try:
             stdout, stderr = process.communicate(timeout=max_seconds + 2)
         except subprocess.TimeoutExpired as error:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except OSError:
+            if hasattr(os, "killpg"):
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except OSError:
+                    process.kill()
+            else:
                 process.kill()
             process.communicate()
             raise SandboxTimeout("shell command timed out") from error

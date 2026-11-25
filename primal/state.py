@@ -1,3 +1,4 @@
+import ctypes
 import json
 import os
 import signal
@@ -8,6 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import STATE_DIR, ensure_dirs
+
+IS_WINDOWS = sys.platform == "win32"
+STILL_ACTIVE = 259
 
 
 def _now():
@@ -49,9 +53,28 @@ def _read_pid_file(name):
         return None
 
 
+def _windows_pid_alive(pid):
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, int(pid))
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
 def pid_alive(pid):
     if not pid or pid <= 1:
         return False
+    if IS_WINDOWS:
+        return _windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except OSError:
@@ -98,14 +121,27 @@ def start_daemon(name, argv):
     log = open(log_path(name), "a", encoding="utf-8")
     log.write(f"\n--- {_now()} starting {' '.join(argv)} ---\n")
     log.flush()
+    if getattr(sys, "frozen", False):
+        command = [sys.executable, *argv]
+    else:
+        command = [sys.executable, "-m", "primal.cli", *argv]
+    options = {}
+    if IS_WINDOWS:
+        options["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NO_WINDOW
+        )
+    else:
+        options["start_new_session"] = True
     process = subprocess.Popen(
-        [sys.executable, "-m", "primal.cli", *argv],
+        command,
         stdin=subprocess.DEVNULL,
         stdout=log,
         stderr=subprocess.STDOUT,
-        start_new_session=True,
         cwd=str(Path.home()),
         close_fds=True,
+        **options,
     )
     write_pid(name, process.pid)
     time.sleep(1.2)
@@ -132,7 +168,7 @@ def stop_daemon(name, timeout=20):
             return pid
         time.sleep(0.1)
     try:
-        os.kill(pid, signal.SIGKILL)
+        os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
     except OSError:
         pass
     remove_pid(name)

@@ -1,5 +1,6 @@
 import json
 import os
+import platform
 import secrets
 import tempfile
 import uuid
@@ -7,8 +8,25 @@ from pathlib import Path
 
 DEFAULT_SERVER = "https://primalmonitor.vercel.app"
 
-APP_DIR = Path(os.environ.get("PRIMAL_CONFIG_HOME", Path.home() / ".config" / "primal"))
-STATE_DIR = Path(os.environ.get("PRIMAL_STATE_HOME", Path.home() / ".local" / "state" / "primal"))
+
+def _platform_dirs():
+    system = platform.system().lower()
+    home = Path.home()
+    if system == "windows":
+        app = Path(os.environ.get("APPDATA") or home / "AppData" / "Roaming") / "primal"
+        state = Path(os.environ.get("LOCALAPPDATA") or home / "AppData" / "Local") / "primal" / "state"
+        return app, state
+    if system == "darwin":
+        app = home / "Library" / "Application Support" / "primal"
+        return app, app / "state"
+    app = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config") / "primal"
+    state = Path(os.environ.get("XDG_STATE_HOME") or home / ".local" / "state") / "primal"
+    return app, state
+
+
+_DEFAULT_APP_DIR, _DEFAULT_STATE_DIR = _platform_dirs()
+APP_DIR = Path(os.environ.get("PRIMAL_CONFIG_HOME") or _DEFAULT_APP_DIR)
+STATE_DIR = Path(os.environ.get("PRIMAL_STATE_HOME") or _DEFAULT_STATE_DIR)
 CONFIG_PATH = APP_DIR / "config.json"
 
 DEFAULTS = {

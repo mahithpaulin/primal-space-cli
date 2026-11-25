@@ -1,47 +1,40 @@
-import hashlib
 import unittest
 
-from primal.workload import MOD, hash_sum, normalize_params
-
-
-def naive_hash_sum(seed, iterations):
-    total = 0
-    for index in range(iterations):
-        digest = hashlib.sha256(f"{seed}:{index}".encode("utf-8")).digest()
-        total = (total + int.from_bytes(digest[:8], "big")) % MOD
-    return total
+from primal.workload import WORKLOADS, normalize_http_params, normalize_python_params, normalize_shell_params
 
 
 class WorkloadTests(unittest.TestCase):
-    def test_known_vector_matches_server_implementation(self):
-        result = hash_sum({"seed": "primal-test", "iterations": 100, "chunks": 4})
-        self.assertEqual(result["value"], 89178844)
-        self.assertEqual(
-            result["chunk_values"],
-            [805002654, 820370785, 130342796, 333462623],
-        )
+    def test_supported_workloads(self):
+        self.assertEqual(WORKLOADS, ("python", "shell", "http"))
 
-    def test_chunking_is_independent_and_consistent(self):
-        for chunks in (1, 2, 3, 7, 16):
-            result = hash_sum({"seed": "chunk-check", "iterations": 123, "chunks": chunks})
-            self.assertEqual(result["value"], naive_hash_sum("chunk-check", 123))
-            self.assertEqual(sum(result["chunk_values"]) % MOD, result["value"])
+    def test_python_params_normalization(self):
+        params = normalize_python_params({"code": "def main(args):\n    return args\n", "items": [1, 2]})
+        self.assertEqual(params["args"], [1, 2])
+        self.assertEqual(params["items"], [1, 2])
+        with self.assertRaises(ValueError):
+            normalize_python_params({"code": ""})
+        with self.assertRaises(ValueError):
+            normalize_python_params({"code": "x = 1", "items": "nope"})
 
-    def test_single_chunk_vector(self):
-        self.assertEqual(
-            hash_sum({"seed": "primal", "iterations": 10, "chunks": 1})["value"],
-            430038476,
-        )
+    def test_python_explicit_args_override_items(self):
+        params = normalize_python_params({"code": "def main(args):\n    return args\n", "items": [1], "args": {"seed": 4}})
+        self.assertEqual(params["args"], {"seed": 4})
 
-    def test_invalid_parameters_are_rejected(self):
+    def test_shell_params_normalization(self):
+        params = normalize_shell_params({"command": "echo hi"})
+        self.assertEqual(params["command"], "echo hi")
         with self.assertRaises(ValueError):
-            normalize_params({"seed": "bad seed", "iterations": 10, "chunks": 1})
+            normalize_shell_params({"command": "   "})
+
+    def test_http_params_normalization(self):
+        params = normalize_http_params({"url": "https://example.com"})
+        self.assertEqual(params["method"], "GET")
+        self.assertEqual(params["timeout_s"], 20)
+        params = normalize_http_params({"url": "https://example.com", "method": "post", "timeout_s": 90})
+        self.assertEqual(params["method"], "POST")
+        self.assertEqual(params["timeout_s"], 30)
         with self.assertRaises(ValueError):
-            normalize_params({"seed": "ok", "iterations": 0, "chunks": 1})
-        with self.assertRaises(ValueError):
-            normalize_params({"seed": "ok", "iterations": 10, "chunks": 65})
-        with self.assertRaises(ValueError):
-            normalize_params({"seed": "ok", "iterations": 500001, "chunks": 1})
+            normalize_http_params({"url": "ftp://example.com"})
 
 
 if __name__ == "__main__":

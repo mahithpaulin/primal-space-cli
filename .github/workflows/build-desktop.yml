@@ -1,0 +1,93 @@
+name: Build desktop binaries
+
+on:
+  push:
+    branches: [main]
+    tags: ["desktop-v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux-x64
+          - os: windows-latest
+            artifact: windows-x64
+          - os: macos-13
+            artifact: macos-x64
+          - os: macos-14
+            artifact: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Tk (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip setuptools wheel pyinstaller
+      - name: Install package
+        run: python -m pip install --no-build-isolation .
+      - name: Check CLI
+        run: python -m primal.cli --version
+      - name: Build binary
+        run: >-
+          python -m PyInstaller --onefile --name primal-space
+          --distpath dist/${{ matrix.artifact }}
+          --workpath build/${{ matrix.artifact }}
+          --specpath build/${{ matrix.artifact }}
+          desktop_entry.py
+      - name: Package and checksum
+        shell: bash
+        run: |
+          cd "dist/${{ matrix.artifact }}"
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            mv primal-space.exe "primal-space-${{ matrix.artifact }}.exe"
+            sha256sum "primal-space-${{ matrix.artifact }}.exe" > "primal-space-${{ matrix.artifact }}.exe.sha256"
+          else
+            mv primal-space "primal-space-${{ matrix.artifact }}"
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "primal-space-${{ matrix.artifact }}" > "primal-space-${{ matrix.artifact }}.sha256"
+            else
+              shasum -a 256 "primal-space-${{ matrix.artifact }}" > "primal-space-${{ matrix.artifact }}.sha256"
+            fi
+          fi
+      - name: Smoke test binary
+        shell: bash
+        run: |
+          cd "dist/${{ matrix.artifact }}"
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            ./"primal-space-${{ matrix.artifact }}.exe" --version
+          else
+            ./"primal-space-${{ matrix.artifact }}" --version
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: primal-space-${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: List release assets
+        run: ls -la release
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

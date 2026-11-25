@@ -797,7 +797,11 @@ def cmd_agent(args):
         name = args.name or settings["name"]
         print(f"Signing in with ChatGPT as '{name}'...")
         print("A browser window will open; approve the request there.")
-        record = login(agent_name=name, open_browser=not args.no_browser)
+        record = login(
+            agent_name=name,
+            open_browser=not args.no_browser,
+            on_url=lambda url: print(f"Open this URL to continue:\n{url}"),
+        )
         set_agent_setting("agent_name", name)
         print(f"Signed in as {record.get('email') or 'ChatGPT account'}.")
         print(f"Client id: {record.get('client_id')}")

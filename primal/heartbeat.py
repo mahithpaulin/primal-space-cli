@@ -20,6 +20,21 @@ LOG = logging.getLogger("primal.heartbeat")
 STOP = threading.Event()
 
 
+def _agent_payload(config):
+    from .agent import agent_settings
+    from .chatgpt import status as chatgpt_status
+
+    settings = agent_settings(config)
+    account = chatgpt_status()
+    return {
+        "name": settings["name"],
+        "enabled": bool(settings["enabled"]) or bool(account.get("connected")),
+        "model": settings["model"],
+        "account": account.get("email") or "",
+        "connected": bool(account.get("connected")),
+    }
+
+
 def _worker_payload(config):
     status = read_worker_status()
     if not running_pid("worker"):
@@ -88,6 +103,7 @@ def send_once(config=None, log=None):
         },
         wallet=wallet_payload(),
         caps=caps_payload(config),
+        agent=_agent_payload(config),
     )
     _apply_lending_request(config, response)
     write_runtime(

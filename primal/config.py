@@ -53,6 +53,12 @@ DEFAULTS = {
     "profile_name": "",
     "profile_status": "",
     "profile_avatar": "",
+    "agent_name": "",
+    "agent_model": "",
+    "agent_enabled": False,
+    "agent_persona": "",
+    "agent_reply_all": False,
+    "agent_poll_interval": 20,
 }
 
 BOOL_KEYS = {
@@ -61,6 +67,8 @@ BOOL_KEYS = {
     "cancel_current",
     "lending_enabled",
     "auto_lend_on_start",
+    "agent_enabled",
+    "agent_reply_all",
 }
 INT_KEYS = {
     "minimum_battery",
@@ -74,12 +82,23 @@ INT_KEYS = {
     "max_compute_minutes_day",
     "max_compute_minutes_week",
     "max_compute_minutes_month",
+    "agent_poll_interval",
 }
 FLOAT_KEYS = {
     "lend_units_per_hour",
 }
 SECRET_KEYS = {"token", "enrollment_key"}
-TEXT_KEYS = {"server_url", "device_name", "compute_mode", "profile_name", "profile_status", "profile_avatar"}
+TEXT_KEYS = {
+    "server_url",
+    "device_name",
+    "compute_mode",
+    "profile_name",
+    "profile_status",
+    "profile_avatar",
+    "agent_name",
+    "agent_model",
+    "agent_persona",
+}
 
 
 def ensure_dirs():

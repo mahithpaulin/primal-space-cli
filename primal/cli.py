@@ -752,6 +752,178 @@ def cmd_sandbox_child(args):
     return child_main(args.payload)
 
 
+def _agent_client(config):
+    if not config.get("device_id") or not config.get("token"):
+        raise RuntimeError("device is not registered; run: primal connect")
+    return _api(config)
+
+
+def cmd_agent(args):
+    from .agent import (
+        agent_settings,
+        read_agent_state,
+        run_once,
+        set_agent_setting,
+    )
+    from .chatgpt import (
+        clear_credentials,
+        list_models,
+        login,
+        read_credentials,
+        status as chatgpt_status,
+    )
+
+    config = load_config()
+    settings = agent_settings(config)
+    action = args.agent_command
+
+    if action == "status":
+        account = chatgpt_status()
+        state = read_agent_state()
+        print(f"Agent name: {settings['name']}")
+        print(f"Model: {settings['model'] or 'auto (from the signed-in account)'}")
+        print(f"Enabled: {'yes' if settings['enabled'] else 'no'}")
+        print(f"ChatGPT account: {account.get('email') or 'not signed in'}")
+        if account.get("connected"):
+            print(f"Client id: {account.get('client_id')}")
+            print(f"Host id: {account.get('host_id')}")
+            print(f"Scopes: {' '.join(account.get('scopes') or [])}")
+            print(f"Session expires: {account.get('expires_at')} ({'expired' if account.get('expired') else 'valid'})")
+        print(f"Group replies sent: {state.get('replies', 0)}")
+        print(f"Last run: {state.get('last_run') or 'never'}")
+        return 0
+
+    if action == "login":
+        name = args.name or settings["name"]
+        print(f"Signing in with ChatGPT as '{name}'...")
+        print("A browser window will open; approve the request there.")
+        record = login(agent_name=name, open_browser=not args.no_browser)
+        set_agent_setting("agent_name", name)
+        print(f"Signed in as {record.get('email') or 'ChatGPT account'}.")
+        print(f"Client id: {record.get('client_id')}")
+        print(f"Host id: {record.get('ext_agent_host_id')}")
+        return 0
+
+    if action == "logout":
+        removed = clear_credentials()
+        print("ChatGPT session removed." if removed else "No ChatGPT session found.")
+        return 0
+
+    if action == "name":
+        value = (args.value or "").strip()[:48]
+        if not value:
+            raise ValueError("agent name cannot be empty")
+        set_agent_setting("agent_name", value)
+        print(f"Agent renamed to '{value}'.")
+        return 0
+
+    if action == "model":
+        if args.value:
+            set_agent_setting("agent_model", args.value.strip()[:64])
+            print(f"Model set to {args.value.strip()[:64]}.")
+        else:
+            print(f"Model: {settings['model'] or 'auto (from the signed-in account)'}")
+        return 0
+
+    if action == "models":
+        if not read_credentials():
+            raise RuntimeError("not signed in with ChatGPT; run: primal agent login")
+        for model in list_models():
+            print(f"{model['slug']}  {model['display_name']}")
+        return 0
+
+    if action == "enable":
+        set_agent_setting("agent_enabled", True)
+        print("Agent enabled.")
+        return 0
+
+    if action == "disable":
+        set_agent_setting("agent_enabled", False)
+        print("Agent disabled.")
+        return 0
+
+    if action == "reply-all":
+        set_agent_setting("agent_reply_all", args.enabled == "on")
+        print(f"Agent replies to every group message: {args.enabled}.")
+        return 0
+
+    if action == "groups":
+        client = _agent_client(config)
+        groups = client.get_groups(config["device_id"]).get("groups") or []
+        if not groups:
+            print("No group chats yet.")
+            return 0
+        for group in groups:
+            names = ", ".join(member.get("name") or member.get("id", "")[:8] for member in group.get("members") or [])
+            print(f"{group['name']}  {group['id']}  members: {names}")
+        return 0
+
+    if action == "group":
+        client = _agent_client(config)
+        members = []
+        for token in args.members:
+            peers = client.get_peers(config["device_id"]).get("peers") or []
+            match = next(
+                (
+                    peer
+                    for peer in peers
+                    if peer.get("id") == token
+                    or str(peer.get("name", "")).lower() == token.lower()
+                ),
+                None,
+            )
+            if not match:
+                print(f"Unknown device: {token}")
+                return 1
+            members.append(match["id"])
+        group = client.create_group(config["device_id"], args.name, members).get("group") or {}
+        print(f"Group '{group.get('name')}' created: {group.get('id')}")
+        return 0
+
+    if action == "run":
+        if not read_credentials():
+            print("No ChatGPT session yet; starting sign-in.")
+            login(agent_name=settings["name"])
+        replies = run_once(config)
+        if not replies:
+            print("No new messages to answer.")
+            return 0
+        for reply in replies:
+            print(f"→ {reply['target']}: {reply['text']}")
+        return 0
+
+    if action == "start":
+        if not read_credentials():
+            print("No ChatGPT session yet; starting sign-in.")
+            login(agent_name=settings["name"])
+        set_agent_setting("agent_enabled", True)
+        pid = start_daemon("agent", ["_agent"])
+        print(f"Agent running (pid {pid})")
+        return 0
+
+    if action == "stop":
+        pid = stop_daemon("agent", timeout=20)
+        if pid:
+            print(f"Agent stopped (pid {pid}).")
+        else:
+            print("Agent was not running.")
+        return 0
+
+    return 0
+
+
+def cmd_sandbox_child(args):
+    from .sandbox import child_main
+
+    return child_main(args.payload)
+
+
+def run_agent_daemon():
+    from .agent import run_forever
+
+    return run_forever()
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="primal",
@@ -874,8 +1046,38 @@ def build_parser():
     )
     desktop_parser.set_defaults(func=cmd_desktop)
 
+    agent_parser = subparsers.add_parser(
+        "agent", help="ChatGPT-powered Primal agent for group chats"
+    )
+    agent_sub = agent_parser.add_subparsers(dest="agent_command", required=True)
+    agent_login = agent_sub.add_parser("login", help="sign in with ChatGPT (opens the browser)")
+    agent_login.add_argument("--name", help="name shown for the agent during sign-in")
+    agent_login.add_argument("--no-browser", action="store_true", help="print the URL instead of opening it")
+    agent_sub.add_parser("logout", help="remove the stored ChatGPT session")
+    agent_sub.add_parser("status", help="show agent and ChatGPT session status")
+    agent_name_parser = agent_sub.add_parser("name", help="rename the agent")
+    agent_name_parser.add_argument("value", help="new agent name")
+    agent_model_parser = agent_sub.add_parser("model", help="show or set the model")
+    agent_model_parser.add_argument("value", nargs="?", help="model slug")
+    agent_sub.add_parser("models", help="list models available to the signed-in account")
+    agent_sub.add_parser("enable", help="enable the agent")
+    agent_sub.add_parser("disable", help="disable the agent")
+    agent_reply = agent_sub.add_parser("reply-all", help="reply to every group message, not just mentions")
+    agent_reply.add_argument("enabled", choices=["on", "off"])
+    agent_groups = agent_sub.add_parser("groups", help="list group chats this device belongs to")
+    agent_group = agent_sub.add_parser("group", help="create a group chat")
+    agent_group.add_argument("name", help="group name")
+    agent_group.add_argument("members", nargs="*", help="device names or ids")
+    agent_run = agent_sub.add_parser("run", help="answer pending messages once")
+    agent_run.add_argument("--once", action="store_true", help="run a single pass (default)")
+    agent_sub.add_parser("start", help="run the agent in the background")
+    agent_sub.add_parser("stop", help="stop the background agent")
+    agent_parser.set_defaults(func=cmd_agent)
+
     subparsers.add_parser("_heartbeat", help=argparse.SUPPRESS).set_defaults(func=lambda _args: run_heartbeat())
     subparsers.add_parser("_worker", help=argparse.SUPPRESS).set_defaults(func=lambda _args: run_worker())
+    agent_daemon = subparsers.add_parser("_agent", help=argparse.SUPPRESS)
+    agent_daemon.set_defaults(func=lambda _args: run_agent_daemon())
     sandbox_parser = subparsers.add_parser("_sandbox", help=argparse.SUPPRESS)
     sandbox_parser.add_argument("payload")
     sandbox_parser.set_defaults(func=cmd_sandbox_child)

@@ -76,6 +76,31 @@ Binaries are built by `.github/workflows/build-desktop.yml` (PyInstaller on
 `ubuntu-latest`, `windows-latest`, `macos-13` and `macos-14`). Tag `desktop-v*`
 to publish a release.
 
+## Primal agent (ChatGPT)
+
+The node can host an agent that answers chats using the owner's ChatGPT plan.
+Sign-in uses OpenAI's **Sign in with ChatGPT** flow for open-source clients
+(dynamic client registration, PKCE, `ext_agent_host_id`, no client secret).
+
+```sh
+primal agent login           # opens the browser, then stores the session
+primal agent name "Ada"      # name the agent anything you like
+primal agent models          # models available to the signed-in account
+primal agent groups          # group chats this device belongs to
+primal agent group "Crew" "Realme Narzo 50A"
+primal agent start           # background agent daemon
+primal agent status
+```
+
+The agent replies to direct messages and to group messages that mention its
+name (`primal agent reply-all on` makes it answer every group message). It can
+report node status and notify peers with the `node_status` and `send_message`
+tools. Tokens are stored only on the device (`~/.local/state/primal/chatgpt_credentials.json`,
+mode `0600`) and never sent to the monitor.
+
+Desktop: open the **Agent** tab and press *Continue with ChatGPT*.
+Android: open **Primal agent** and press *Continue with ChatGPT*.
+
 ## Quick start
 
 ```sh
@@ -119,6 +144,9 @@ background heartbeat daemon. The device appears on the monitor at
 | `primal disconnect` | Stop daemons and mark the device offline |
 | `primal logs heartbeat\|worker` | Show recent daemon logs |
 | `primal desktop` | Open the desktop window (Windows, macOS, Linux) |
+| `primal agent login\|logout\|status\|name\|model\|models` | ChatGPT sign-in and agent identity |
+| `primal agent groups\|group` | List or create group chats |
+| `primal agent run\|start\|stop` | Answer pending messages now or in the background |
 
 ## Default contribution settings
 

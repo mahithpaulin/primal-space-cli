@@ -86,6 +86,7 @@ class ApiClient:
         profile=None,
         wallet=None,
         caps=None,
+        agent=None,
     ):
         payload = {
             "device_id": device_id,
@@ -105,6 +106,8 @@ class ApiClient:
             payload["wallet"] = wallet
         if caps:
             payload["caps"] = caps
+        if agent:
+            payload["agent"] = agent
         return self.request("POST", "/api/v1/heartbeat", payload)
 
     def disconnect(self, device_id):
@@ -156,6 +159,16 @@ class ApiClient:
 
     def get_peers(self, device_id):
         return self.request("GET", f"/api/v1/peers?device_id={urllib.parse.quote(device_id)}")
+
+    def get_groups(self, device_id):
+        return self.request("GET", f"/api/v1/groups?device_id={urllib.parse.quote(device_id)}")
+
+    def create_group(self, device_id, name, members):
+        return self.request(
+            "POST",
+            "/api/v1/groups",
+            {"device_id": device_id, "name": name, "members": list(members or [])},
+        )
 
     def get_messages(self, device_id, since=None):
         query = f"?device_id={urllib.parse.quote(device_id)}"

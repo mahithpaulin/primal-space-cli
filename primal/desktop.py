@@ -79,6 +79,7 @@ class DesktopApp(tk.Tk):
         self._build_overview(notebook)
         self._build_settings(notebook)
         self._build_messages(notebook)
+        self._build_agent(notebook)
         self._build_logs(notebook)
 
         footer = ttk.Frame(self, padding=(16, 6))
@@ -212,6 +213,137 @@ class DesktopApp(tk.Tk):
             side="bottom", anchor="w", pady=(8, 0)
         )
 
+    def _build_agent(self, notebook):
+        frame = self._tab("Agent")
+        top = ttk.Frame(frame)
+        top.pack(fill="x")
+        ttk.Button(top, text="Continue with ChatGPT", command=self._agent_login).pack(side="left")
+        ttk.Button(top, text="Refresh", command=self._refresh_agent).pack(side="left", padx=(8, 0))
+        ttk.Button(top, text="Start agent", command=lambda: self._run(["agent", "start"])).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(top, text="Stop agent", command=lambda: self._run(["agent", "stop"])).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(top, text="Run once", command=lambda: self._run(["agent", "run"])).pack(
+            side="left", padx=(8, 0)
+        )
+
+        form = ttk.Frame(frame)
+        form.pack(fill="x", pady=(14, 0))
+        ttk.Label(form, text="Agent name").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Entry(form, textvariable=self._var("agent_name"), width=32).grid(
+            row=0, column=1, sticky="w", padx=(16, 0)
+        )
+        ttk.Label(form, text="Model (blank = account default)").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Entry(form, textvariable=self._var("agent_model"), width=32).grid(
+            row=1, column=1, sticky="w", padx=(16, 0)
+        )
+        ttk.Label(form, text="Reply to every group message").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Checkbutton(form, variable=self._agent_reply_all).grid(row=2, column=1, sticky="w", padx=(16, 0))
+        ttk.Button(form, text="Save agent settings", command=self._save_agent).grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(10, 0)
+        )
+
+        status = ttk.Label(frame, textvariable=self._var("agent_status"), style="Hint.TLabel", wraplength=700)
+        status.pack(fill="x", pady=(14, 0))
+
+        ttk.Label(frame, text="Group chats", style="Value.TLabel").pack(anchor="w", pady=(16, 0))
+        self._groups = tk.Text(frame, height=8, wrap="word", state="disabled")
+        self._groups.pack(fill="both", expand=True, pady=(6, 0))
+
+    @property
+    def _agent_reply_all(self):
+        if not hasattr(self, "_agent_reply_var"):
+            self._agent_reply_var = tk.BooleanVar(value=False)
+        return self._agent_reply_var
+
+    def _agent_login(self):
+        from .chatgpt import login
+        from .agent import agent_settings, set_agent_setting
+
+        name = self._var("agent_name").get().strip() or agent_settings()["name"]
+        self._var("status").set("waiting for the ChatGPT sign-in in your browser")
+        self._log_write(f"Signing in with ChatGPT as '{name}' ...")
+
+        def worker():
+            try:
+                record = login(agent_name=name, on_url=lambda url: self.after(0, self._log_write, url))
+            except Exception as error:
+                self.after(0, self._var("status").set, f"sign-in failed: {error}")
+                return
+            try:
+                set_agent_setting("agent_name", name)
+            except Exception:
+                pass
+            self.after(0, self._var("status").set, f"signed in as {record.get('email') or 'ChatGPT account'}")
+            self.after(0, self._refresh_agent)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _save_agent(self):
+        from .agent import set_agent_setting
+
+        try:
+            set_agent_setting("agent_name", self._var("agent_name").get().strip()[:48])
+            set_agent_setting("agent_model", self._var("agent_model").get().strip()[:64])
+            set_agent_setting("agent_reply_all", bool(self._agent_reply_all.get()))
+        except Exception as error:
+            self._var("status").set(f"could not save: {error}")
+            return
+        self._var("status").set("agent settings saved")
+        self._refresh_agent()
+
+    def _refresh_agent(self):
+        from .agent import agent_settings, read_agent_state
+        from .chatgpt import status as chatgpt_status
+
+        settings = agent_settings()
+        account = chatgpt_status()
+        self._var("agent_name").set(settings["name"])
+        self._var("agent_model").set(settings["model"])
+        self._agent_reply_all.set(settings["reply_all"])
+        if account.get("connected"):
+            text = (
+                f"ChatGPT connected as {account.get('email') or 'unknown account'}"
+                f" · client {str(account.get('client_id'))[:18]}..."
+                f" · expires {account.get('expires_at')}"
+            )
+        else:
+            text = "Not signed in with ChatGPT yet."
+        state = read_agent_state()
+        text += f" · replies sent: {state.get('replies', 0)} · last run: {state.get('last_run') or 'never'}"
+        self._var("agent_status").set(text)
+        self._load_groups()
+
+    def _load_groups(self):
+        try:
+            config = load_config()
+            if not config.get("device_id") or not config.get("token"):
+                self._set_groups("Connect first to load group chats.")
+                return
+            client = ApiClient(config["server_url"], token=config.get("token"))
+            groups = client.get_groups(config["device_id"]).get("groups") or []
+        except (ApiError, OSError, ValueError) as error:
+            self._set_groups(f"Could not load groups: {error}")
+            return
+        if not groups:
+            self._set_groups("No group chats yet.")
+            return
+        lines = []
+        for group in groups:
+            names = ", ".join(
+                member.get("name") or member.get("id", "")[:8] for member in group.get("members") or []
+            )
+            lines.append(f"{group.get('name')}  ·  {names}")
+        self._set_groups("\n".join(lines))
+
+    def _set_groups(self, text):
+        self._groups.configure(state="normal")
+        self._groups.delete("1.0", "end")
+        self._groups.insert("end", text + "\n")
+        self._groups.configure(state="disabled")
+
     @property
     def _auto(self):
         return self._auto_var
@@ -229,6 +361,8 @@ class DesktopApp(tk.Tk):
             return
         if current == "Messages":
             self._refresh_messages()
+        elif current == "Agent":
+            self._refresh_agent()
         elif current == "Logs":
             self._refresh_logs()
         elif current == "Settings":

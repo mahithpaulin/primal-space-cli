@@ -34,9 +34,11 @@ IDENTITY_SCOPES = "openid profile email"
 PLAN_SCOPES = "offline_access resource.invoke chatgpt.tokens.use.direct"
 CALLBACK_PATH = "/auth/callback"
 ISSUER = "https://auth.openai.com"
+DEBUG_LOG = STATE_DIR / "chatgpt_debug.log"
 
 CREDENTIALS_FILE = STATE_DIR / "chatgpt_credentials.json"
 HOST_ID_FILE = STATE_DIR / "agent_host_id"
+PENDING_CLIENT_FILE = STATE_DIR / "chatgpt_client_id"
 
 
 class OAuthError(RuntimeError):
@@ -93,15 +95,103 @@ def write_credentials(credentials):
     os.replace(temp, CREDENTIALS_FILE)
 
 
-def clear_credentials():
+def pending_client_id():
     try:
-        CREDENTIALS_FILE.unlink()
+        return PENDING_CLIENT_FILE.read_text(encoding="utf-8").strip()
     except OSError:
+        return ""
+
+
+def set_pending_client_id(value):
+    if not value:
+        return
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    PENDING_CLIENT_FILE.write_text(value + "\n", encoding="utf-8")
+    try:
+        PENDING_CLIENT_FILE.chmod(0o600)
+    except OSError:
+        pass
+
+
+def clear_credentials():
+    removed = False
+    for path in (CREDENTIALS_FILE, PENDING_CLIENT_FILE):
+        try:
+            path.unlink()
+            removed = True
+        except OSError:
+            continue
+    return removed
+
+
+def revoke(record=None):
+    record = record or read_credentials()
+    if not record:
         return False
-    return True
+    refresh_token = record.get("refresh_token")
+    if not refresh_token:
+        return False
+    endpoint = "https://auth.openai.com/oauth/revoke"
+    try:
+        discovery = _fetch_json("https://auth.openai.com/.well-known/openid-configuration", timeout=20)
+        endpoint = discovery.get("revocation_endpoint") or endpoint
+    except OAuthError:
+        pass
+    try:
+        _post_form(
+            endpoint,
+            {
+                "token": refresh_token,
+                "token_type_hint": "refresh_token",
+                "client_id": record.get("client_id"),
+            },
+        )
+        return True
+    except OAuthError:
+        return False
+
+
+def _debug_enabled():
+    return os.environ.get("PRIMAL_CHATGPT_DEBUG", "").strip() not in ("", "0", "false")
+
+
+def _debug(message):
+    if not _debug_enabled():
+        return
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with DEBUG_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(f"{stamp} {message}\n")
+    except OSError:
+        pass
+
+
+def _redact(value):
+    text = str(value or "")
+    if len(text) <= 8:
+        return f"<len:{len(text)}>"
+    return f"<len:{len(text)} sha1:{hashlib.sha256(text.encode()).hexdigest()[:12]}>"
+
+
+def _parse_query(raw):
+    params = {}
+    for pair in raw.split("&"):
+        if not pair:
+            continue
+        key, _, value = pair.partition("=")
+        params[urllib.parse.unquote(key)] = urllib.parse.unquote(value)
+    return params
 
 
 def _post_form(url, fields, timeout=30):
+    if url == TOKEN_URL:
+        shown = {key: _redact(value) for key, value in fields.items()}
+        shown["client_id"] = fields.get("client_id")
+        shown["redirect_uri"] = fields.get("redirect_uri")
+        shown["resource"] = fields.get("resource")
+        shown["grant_type"] = fields.get("grant_type")
+        _debug(f"token request url={url} fields={shown}")
     data = urllib.parse.urlencode(fields).encode("utf-8")
     request = urllib.request.Request(
         url,
@@ -113,7 +203,10 @@ def _post_form(url, fields, timeout=30):
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", "replace")[:400]
+        detail = error.read().decode("utf-8", "replace")[:600]
+        request_id = error.headers.get("openai-request-id") or error.headers.get("x-request-id")
+        if url == TOKEN_URL:
+            _debug(f"token response status={error.code} request_id={request_id} body={detail}")
         raise OAuthError(f"token request failed ({error.code}): {detail}") from error
     except (urllib.error.URLError, OSError) as error:
         raise OAuthError(f"token request failed: {error}") from error
@@ -225,8 +318,14 @@ class _CallbackHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
-        query = urllib.parse.parse_qs(parsed.query)
-        type(self).result = {key: values[0] for key, values in query.items()}
+        raw_query = parsed.query
+        query = _parse_query(raw_query)
+        _debug(
+            f"callback raw_query={raw_query[:200]!r} keys={sorted(query)} "
+            f"code={_redact(query.get('code'))} client_id={query.get('client_id')!r} "
+            f"scope={query.get('scope')!r} error={query.get('error')!r}"
+        )
+        type(self).result = dict(query, _raw_query=raw_query)
         body = b"<html><body><h3>PrimalSpace</h3><p>Sign in complete. You can close this tab.</p></body></html>"
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -289,72 +388,83 @@ def _wait_for_callback(server, expected_state, timeout=300):
     raise OAuthError("timed out waiting for the browser sign-in")
 
 
-def login(agent_name="PrimalSpace", open_browser=True, timeout=900, on_url=None):
+def login(agent_name="PrimalSpace", open_browser=True, timeout=900, on_url=None, attempts=3):
     """Run the SIWC flow and return the stored credential record."""
     saved = read_credentials() or {}
-    client_id = saved.get("client_id")
-    server = HTTPServer(("127.0.0.1", 0), _CallbackHandler)
-    request = authorization_url(
-        agent_name,
-        client_id=client_id,
-        id_token=saved.get("id_token"),
-        login_hint=saved.get("email"),
-        port=server.server_address[1],
-    )
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        if on_url is not None:
-            try:
-                on_url(request["url"])
-            except Exception:
-                pass
-        if open_browser:
-            try:
-                webbrowser.open(request["url"])
-            except Exception:
-                pass
-        callback = _wait_for_callback(server, request["state"], timeout=timeout)
-    finally:
-        server.shutdown()
-        server.server_close()
-    issued_client_id = callback.get("client_id") or client_id
-    if not issued_client_id:
-        raise OAuthError("authorization response did not include an issued client id")
-    if client_id and callback.get("client_id") and callback.get("client_id") != client_id:
-        raise OAuthError("authorization returned a different client id than the saved registration")
-    token = _post_form(
-        TOKEN_URL,
-        {
-            "grant_type": "authorization_code",
+    client_id = saved.get("client_id") or pending_client_id() or None
+    last_error = None
+    for attempt in range(max(1, attempts)):
+        server = HTTPServer(("127.0.0.1", 0), _CallbackHandler)
+        request = authorization_url(
+            agent_name,
+            client_id=client_id,
+            id_token=saved.get("id_token"),
+            login_hint=saved.get("email"),
+            port=server.server_address[1],
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            if on_url is not None:
+                try:
+                    on_url(request["url"])
+                except Exception:
+                    pass
+            if open_browser:
+                try:
+                    webbrowser.open(request["url"])
+                except Exception:
+                    pass
+            callback = _wait_for_callback(server, request["state"], timeout=timeout)
+        finally:
+            server.shutdown()
+            server.server_close()
+        issued_client_id = callback.get("client_id") or client_id
+        if not issued_client_id:
+            raise OAuthError("authorization response did not include an issued client id")
+        if client_id and callback.get("client_id") and callback.get("client_id") != client_id:
+            raise OAuthError("authorization returned a different client id than the saved registration")
+        set_pending_client_id(issued_client_id)
+        client_id = issued_client_id
+        try:
+            token = _post_form(
+                TOKEN_URL,
+                {
+                    "grant_type": "authorization_code",
+                    "client_id": issued_client_id,
+                    "code": callback["code"],
+                    "code_verifier": request["verifier"],
+                    "redirect_uri": request["redirect_uri"],
+                    "resource": RESOURCE,
+                },
+            )
+        except OAuthError as error:
+            if "invalid_grant" in str(error) and attempt + 1 < max(1, attempts):
+                last_error = error
+                continue
+            raise
+        granted = str(token.get("scope") or "").split()
+        if "chatgpt.tokens.use.direct" not in granted:
+            raise OAuthError("the account did not grant ChatGPT plan usage")
+        claims = validate_id_token(token.get("id_token"), issued_client_id, request["nonce"])
+        record = {
             "client_id": issued_client_id,
-            "code": callback["code"],
-            "code_verifier": request["verifier"],
-            "redirect_uri": request["redirect_uri"],
-            "resource": RESOURCE,
-        },
-    )
-    granted = str(token.get("scope") or "").split()
-    if "chatgpt.tokens.use.direct" not in granted:
-        raise OAuthError("the account did not grant ChatGPT plan usage access")
-    claims = validate_id_token(token.get("id_token"), issued_client_id, request["nonce"])
-    record = {
-        "client_id": issued_client_id,
-        "expires_at": time.time() + int(token.get("expires_in") or 3600),
-        "ext_agent_host_id": host_id(),
-        "id_token": token.get("id_token"),
-        "access_token": token.get("access_token"),
-        "refresh_token": token.get("refresh_token"),
-        "token_type": token.get("token_type") or "Bearer",
-        "expires_in": int(token.get("expires_in") or 3600),
-        "scopes": granted,
-        "email": claims.get("email") or saved.get("email") or "",
-        "subject": claims.get("sub") or "",
-        "issuer": claims.get("iss") or ISSUER,
-        "saved_at": _now_iso(),
-    }
-    write_credentials(record)
-    return record
+            "ext_agent_host_id": host_id(),
+            "expires_at": time.time() + int(token.get("expires_in") or 3600),
+            "id_token": token.get("id_token"),
+            "access_token": token.get("access_token"),
+            "refresh_token": token.get("refresh_token"),
+            "token_type": token.get("token_type") or "Bearer",
+            "expires_in": int(token.get("expires_in") or 3600),
+            "scopes": granted,
+            "email": claims.get("email") or saved.get("email") or "",
+            "subject": claims.get("sub") or "",
+            "issuer": claims.get("iss") or ISSUER,
+            "saved_at": _now_iso(),
+        }
+        write_credentials(record)
+        return record
+    raise last_error or OAuthError("sign-in did not complete")
 
 
 def refresh(credentials=None):

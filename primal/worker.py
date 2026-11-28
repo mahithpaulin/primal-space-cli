@@ -133,9 +133,9 @@ def _clear_cancel_flag():
         pass
 
 
-def _remote_cancelled(client, task_id):
+def _remote_cancelled(client, device_id, task_id):
     try:
-        payload = client.get_task(task_id)
+        payload = client.get_task(device_id, task_id)
     except ApiError:
         return False
     task = payload.get("task") or {}
@@ -177,6 +177,17 @@ def _submit(
 def execute_task(client, config, task):
     device_id = config["device_id"]
     task_id = task["id"]
+    try:
+        response = client.mark_executing(device_id, task_id)
+        remote_task = response.get("task") or {}
+        if remote_task.get("status") != "executing":
+            LOG.info("task %s did not enter execution: %s", task_id, remote_task.get("status") or "unknown")
+            return
+    except ApiError as error:
+        if error.status in {403, 404, 409}:
+            LOG.warning("task %s could not enter execution: %s", task_id, error)
+            return
+        LOG.warning("could not mark task executing: %s", error)
     started = time.monotonic()
     cpu_started = time.process_time()
     child_cpu_started = children_cpu_seconds()
@@ -294,6 +305,7 @@ def execute_task(client, config, task):
         child_cpu_now = children_cpu_seconds()
         if child_cpu_started is not None and child_cpu_now is not None:
             child_cpu = max(0.0, child_cpu_now - child_cpu_started)
+        child_cpu_pct = round((child_cpu or 0.0) / wall_seconds * 100, 1)
         cpu_seconds = max(parent_cpu, child_cpu or 0.0)
         cpu_ratio = min(1.0, cpu_seconds / wall_seconds)
         if lending["enabled"]:
@@ -319,6 +331,7 @@ def execute_task(client, config, task):
                 "cpu_pct_avg": cpu_avg,
                 "cpu_load_pct": load_pct,
                 "worker_cpu_pct_avg": worker_cpu,
+                "child_cpu_pct_avg": child_cpu_pct,
                 "rss_mb_peak": round(peak_rss, 1) if peak_rss is not None else None,
             },
             stdout=stdout,

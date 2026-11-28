@@ -77,6 +77,7 @@ class DesktopApp(tk.Tk):
         self._notebook = notebook
         notebook.bind("<<NotebookTabChanged>>", self._on_tab)
         self._build_overview(notebook)
+        self._build_history(notebook)
         self._build_settings(notebook)
         self._build_messages(notebook)
         self._build_agent(notebook)
@@ -140,6 +141,20 @@ class DesktopApp(tk.Tk):
             style="Hint.TLabel",
             wraplength=700,
         ).pack(fill="x", pady=(18, 0))
+
+    def _build_history(self, notebook):
+        frame = self._tab("History")
+        toolbar = ttk.Frame(frame)
+        toolbar.pack(fill="x")
+        ttk.Label(toolbar, text="Job and task history from the monitor").pack(side="left")
+        ttk.Button(toolbar, text="Refresh", command=self._refresh_history).pack(side="right")
+        body = ttk.Frame(frame)
+        body.pack(fill="both", expand=True, pady=(10, 0))
+        self._history = tk.Text(body, height=18, wrap="word", state="disabled")
+        scroll = ttk.Scrollbar(body, command=self._history.yview)
+        self._history.configure(yscrollcommand=scroll.set)
+        self._history.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
 
     def _build_settings(self, notebook):
         frame = self._tab("Settings")
@@ -361,6 +376,8 @@ class DesktopApp(tk.Tk):
             return
         if current == "Messages":
             self._refresh_messages()
+        elif current == "History":
+            self._refresh_history()
         elif current == "Agent":
             self._refresh_agent()
         elif current == "Logs":
@@ -503,6 +520,54 @@ class DesktopApp(tk.Tk):
         client = ApiClient(config["server_url"], token=config.get("token"))
         payload = client.get_peers(config["device_id"])
         return payload.get("peers") or []
+
+    def _refresh_history(self):
+        config = load_config()
+        if not config.get("device_id") or not config.get("token"):
+            self._set_history("Device is not registered yet. Connect from the Overview tab.")
+            return
+        thread = threading.Thread(target=self._load_history, args=(config,), daemon=True)
+        thread.start()
+
+    def _load_history(self, config):
+        try:
+            client = ApiClient(config["server_url"], token=config.get("token"))
+            payload = client.get_history(config["device_id"], limit=50)
+        except (ApiError, OSError, ValueError) as error:
+            self.after(0, self._set_history, f"Could not load history: {error}")
+            return
+        summary = payload.get("summary") or {}
+        lines = [
+            f"{summary.get('jobs', 0)} job(s) · {summary.get('completed', 0)} completed · "
+            f"{summary.get('failed', 0)} failed · {summary.get('active', 0)} active"
+        ]
+        jobs = payload.get("jobs") or []
+        for job in jobs:
+            progress = job.get("progress") or {}
+            lines.append(
+                f"{job.get('created_at', '')}  {job.get('workload', '')} job "
+                f"{str(job.get('id', ''))[:8]}  {job.get('status', '')}  "
+                f"{progress.get('completed', 0)}/{progress.get('total', 0)} shards"
+            )
+            for shard in job.get("shards") or []:
+                detail = shard.get("error") or shard.get("value")
+                lines.append(
+                    f"    shard {int(shard.get('index', 0)) + 1} · {shard.get('status', '')}"
+                    + (f" · {detail}" if detail is not None else "")
+                )
+        standalone = [task for task in payload.get("tasks") or [] if not task.get("job_id")]
+        for task in standalone:
+            lines.append(
+                f"{task.get('created_at', '')}  {task.get('workload', '')} task "
+                f"{str(task.get('id', ''))[:8]}  {task.get('status', '')}"
+            )
+        self.after(0, self._set_history, "\n".join(lines) or "No history yet.")
+
+    def _set_history(self, text):
+        self._history.configure(state="normal")
+        self._history.delete("1.0", "end")
+        self._history.insert("end", text + "\n")
+        self._history.configure(state="disabled")
 
     def _refresh_messages(self):
         config = load_config()

@@ -2,6 +2,7 @@ import logging
 import signal
 import threading
 import time
+from datetime import datetime, timezone
 
 from .api import ApiClient, ApiError
 from .config import load_config, save_config
@@ -12,8 +13,8 @@ from .state import (
     running_pid,
     write_runtime,
 )
-from .lending import credits_payload, lending_config, read_credits
-from .wallet import caps_payload, wallet_payload
+from .lending import credits_payload, lending_config, read_credits, write_credits
+from .wallet import caps_payload, read_wallet, wallet_payload, write_wallet
 from .workload import WORKLOADS
 
 LOG = logging.getLogger("primal.heartbeat")
@@ -78,6 +79,64 @@ def _apply_lending_request(config, response):
         LOG.info("applied operator lending request: %s", wanted)
 
 
+def _apply_server_wallet(response):
+    payload = response.get("wallet")
+    if not isinstance(payload, dict):
+        return
+    wallet = read_wallet()
+    changed = False
+    for key in ("balance", "earned_total", "spent_total", "units", "total_units"):
+        try:
+            value = float(payload.get(key))
+        except (TypeError, ValueError):
+            continue
+        if not (value == value and abs(value) != float("inf")):
+            continue
+        rounded = round(value, 6)
+        if wallet.get(key) != rounded:
+            wallet[key] = rounded
+            changed = True
+    if changed:
+        write_wallet(wallet)
+
+
+def _apply_server_credits(response):
+    payload = response.get("credits")
+    if not isinstance(payload, dict):
+        return
+    credits = read_credits()
+    changed = False
+    for key in ("units", "total_units", "minutes_used"):
+        try:
+            value = float(payload.get(key))
+        except (TypeError, ValueError):
+            continue
+        if not (value == value and abs(value) != float("inf")):
+            continue
+        rounded = round(value, 6)
+        if credits.get(key) != rounded:
+            credits[key] = rounded
+            changed = True
+    window = payload.get("window_start")
+    window_start = None
+    if window:
+        try:
+            parsed = datetime.fromisoformat(str(window).replace("Z", "+00:00"))
+            epoch = int(parsed.timestamp())
+            window_start = epoch - (epoch % 3600)
+        except (TypeError, ValueError, OSError):
+            window_start = None
+    if credits.get("window_start") != window_start:
+        credits["window_start"] = window_start
+        changed = True
+    updated_at = payload.get("updated_at")
+    if updated_at and credits.get("updated_at") != updated_at:
+        credits["updated_at"] = updated_at
+        changed = True
+    if changed:
+        write_credits(credits)
+
+
 def send_once(config=None, log=None):
     config = config or load_config()
     device_id = config.get("device_id")
@@ -106,6 +165,8 @@ def send_once(config=None, log=None):
         agent=_agent_payload(config),
     )
     _apply_lending_request(config, response)
+    _apply_server_wallet(response)
+    _apply_server_credits(response)
     write_runtime(
         {
             "last_heartbeat_ok": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

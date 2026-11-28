@@ -73,14 +73,20 @@ messages and log tails. Settings are stored per platform:
 - Linux/Termux: `~/.config/primal/config.json`
 
 Binaries are built by `.github/workflows/build-desktop.yml` (PyInstaller on
-`ubuntu-latest`, `windows-latest`, `macos-13` and `macos-14`). Tag `desktop-v*`
-to publish a release.
+`ubuntu-latest`, `windows-latest`, `macos-15-intel` and `macos-15`). Tag
+`desktop-v*` to publish a release.
 
 ## Primal agent (ChatGPT)
 
 The node can host an agent that answers chats using the owner's ChatGPT plan.
 Sign-in uses OpenAI's **Sign in with ChatGPT** flow for open-source clients
 (dynamic client registration, PKCE, `ext_agent_host_id`, no client secret).
+
+> **Requirement:** ChatGPT plan usage for agents requires a paid ChatGPT plan.
+> On a Free account the consent screen reports *"A required permission is
+> unavailable"* and the token exchange returns `invalid_grant`. Upgrade the
+> account (or use another paid account) and run `primal agent login` again; the
+> issued client id is kept so sign-in resumes with the same registration.
 
 ```sh
 primal agent login           # opens the browser, then stores the session

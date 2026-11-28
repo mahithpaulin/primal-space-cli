@@ -117,7 +117,7 @@ class ApiClient:
         return self.request("GET", "/api/v1/devices", token=None)
 
     def get_device(self, device_id):
-        return self.request("GET", f"/api/v1/devices/{device_id}", token=None)
+        return self.request("GET", f"/api/v1/devices/{device_id}")
 
     def claim(self, device_id, compute_enabled, workloads=None):
         payload = {"device_id": device_id, "compute_enabled": compute_enabled}
@@ -129,8 +129,22 @@ class ApiClient:
             payload,
         )
 
-    def get_task(self, task_id):
-        return self.request("GET", f"/api/v1/tasks/{task_id}", token=None)
+    def get_task(self, device_id, task_id):
+        return self.request(
+            "GET",
+            f"/api/v1/tasks/{task_id}?device_id={urllib.parse.quote(device_id)}",
+        )
+
+    def mark_executing(self, device_id, task_id):
+        return self.request(
+            "POST",
+            "/api/v1/tasks/executing",
+            {"device_id": device_id, "task_id": task_id},
+        )
+
+    def get_history(self, device_id, limit=50):
+        query = f"?device_id={urllib.parse.quote(device_id)}&limit={int(limit)}"
+        return self.request("GET", f"/api/v1/history{query}")
 
     def submit_result(
         self,

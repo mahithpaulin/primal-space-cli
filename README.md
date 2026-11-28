@@ -64,9 +64,11 @@ python -m pip install --no-build-isolation .
 primal desktop
 ```
 
-The desktop window manages the same daemons as the CLI: connect/disconnect,
-worker start/stop/pause/resume, compute mode, caps, profile, wallet summary,
-messages and log tails. Settings are stored per platform:
+The desktop window manages the same daemons as the CLI and mirrors the Android
+app (v1.11.0): connect/disconnect, worker start/stop/pause/resume, a dedicated
+**Compute** tab (mode, lending plan, caps, settled numbers), job history, group
+chats with a group creator, the Primal agent, and log tails. Settings are
+stored per platform:
 
 - Windows: `%APPDATA%\primal\config.json`
 - macOS: `~/Library/Application Support/primal/config.json`
@@ -74,7 +76,11 @@ messages and log tails. Settings are stored per platform:
 
 Binaries are built by `.github/workflows/build-desktop.yml` (PyInstaller on
 `ubuntu-latest`, `windows-latest`, `macos-15-intel` and `macos-15`). Tag
-`desktop-v*` to publish a release.
+`desktop-v*` to publish a release. Tests run on every push via
+`.github/workflows/test.yml`.
+
+The monitor console links the installers at
+<https://primalmonitor.vercel.app> (Apps section).
 
 ## Primal agent (ChatGPT)
 

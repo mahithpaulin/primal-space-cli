@@ -39,6 +39,9 @@ jobs:
         run: python -m pip install --no-build-isolation .
       - name: Check CLI
         run: python -m primal.cli --version
+      - name: Smoke test desktop UI
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python -m primal.desktop --smoke
       - name: Build binary
         run: >-
           python -m PyInstaller --onefile --name primal-space

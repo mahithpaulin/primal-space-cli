@@ -2,16 +2,26 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
-from datetime import datetime, timezone
 from tkinter import ttk
 
 from .api import ApiClient, ApiError
-from .config import load_config, save_config
+from .config import load_config, normalize_server, save_config
+from .lending import read_credits
 from .state import read_runtime, read_worker_status, running_pid, tail_log
+from .ui_model import (
+    COMMUNITY_LABEL,
+    MODES,
+    MODE_LABELS,
+    compute_plan,
+    compute_summary,
+    conversation_targets,
+    format_age,
+    group_member_summary,
+    message_lines,
+)
 from .wallet import caps as compute_caps, caps_usage, read_wallet, roll_periods
 
 POLL_MS = 2000
-MODES = ("off", "ondemand", "lend")
 
 
 def _cli_argv(arguments):
@@ -21,18 +31,7 @@ def _cli_argv(arguments):
 
 
 def _age(value):
-    if not value:
-        return "never"
-    try:
-        then = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        seconds = max(0, int((datetime.now(timezone.utc) - then).total_seconds()))
-    except (ValueError, TypeError):
-        return str(value)
-    if seconds < 90:
-        return f"{seconds}s ago"
-    if seconds < 5400:
-        return f"{seconds // 60}m ago"
-    return f"{seconds // 3600}h ago"
+    return format_age(value)
 
 
 class DesktopApp(tk.Tk):
@@ -43,6 +42,7 @@ class DesktopApp(tk.Tk):
         self.minsize(760, 560)
         self._vars = {}
         self._peers = {}
+        self._busy = False
         self._auto_var = tk.BooleanVar(value=True)
         self._build()
         self._refresh()
@@ -77,6 +77,7 @@ class DesktopApp(tk.Tk):
         self._notebook = notebook
         notebook.bind("<<NotebookTabChanged>>", self._on_tab)
         self._build_overview(notebook)
+        self._build_compute(notebook)
         self._build_history(notebook)
         self._build_settings(notebook)
         self._build_messages(notebook)
@@ -134,6 +135,21 @@ class DesktopApp(tk.Tk):
                 command=lambda a=arguments: self._run(a),
             ).grid(row=0, column=index, padx=(0, 8), pady=4, sticky="w")
 
+        shortcuts = ttk.Frame(frame)
+        shortcuts.pack(fill="x", pady=(14, 0))
+        ttk.Label(shortcuts, text="Go to", style="Hint.TLabel").pack(side="left", padx=(0, 8))
+        for label, tab in (
+            ("Compute", "Compute"),
+            ("Messages", "Messages"),
+            ("History", "History"),
+            ("Agent", "Agent"),
+        ):
+            ttk.Button(
+                shortcuts,
+                text=label,
+                command=lambda name=tab: self._select_tab(name),
+            ).pack(side="left", padx=(0, 8))
+
         ttk.Label(
             frame,
             text="Connect registers this machine and starts the heartbeat daemon. "
@@ -141,6 +157,76 @@ class DesktopApp(tk.Tk):
             style="Hint.TLabel",
             wraplength=700,
         ).pack(fill="x", pady=(18, 0))
+
+    def _select_tab(self, name):
+        for index in range(self._notebook.index("end")):
+            if self._notebook.tab(index, "text") == name:
+                self._notebook.select(index)
+                return
+
+    def _build_compute(self, notebook):
+        self._mode_var = tk.StringVar(value="off")
+        frame = self._tab("Compute")
+
+        modes = ttk.LabelFrame(frame, text="Mode", padding=12)
+        modes.pack(fill="x", anchor="n")
+        for index, mode in enumerate(MODES):
+            ttk.Radiobutton(
+                modes,
+                text=MODE_LABELS[mode],
+                value=mode,
+                variable=self._mode_var,
+            ).grid(row=0, column=index, sticky="w", padx=(0, 18))
+        ttk.Checkbutton(modes, text="Start lending when the app opens", variable=self._auto).grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(10, 0)
+        )
+
+        plan = ttk.LabelFrame(frame, text="Lending plan", padding=12)
+        plan.pack(fill="x", anchor="n", pady=(14, 0))
+        plan_rows = (
+            ("CPU share (%)", "plan_cpu"),
+            ("Minutes per hour", "plan_minutes"),
+            ("CU per hour", "plan_units"),
+            ("Daily cap (minutes, 0 = unlimited)", "cap_day"),
+            ("Weekly cap (minutes)", "cap_week"),
+            ("Monthly cap (minutes)", "cap_month"),
+        )
+        for offset, (label, key) in enumerate(plan_rows):
+            ttk.Label(plan, text=label).grid(row=offset, column=0, sticky="w", pady=4)
+            ttk.Entry(plan, textvariable=self._var(key), width=18).grid(
+                row=offset, column=1, sticky="w", padx=(16, 0)
+            )
+        ttk.Button(plan, text="Save plan", command=self._save_compute).grid(
+            row=len(plan_rows), column=0, columnspan=2, sticky="w", pady=(12, 0)
+        )
+
+        settled = ttk.LabelFrame(frame, text="Settled numbers", padding=12)
+        settled.pack(fill="x", anchor="n", pady=(14, 0))
+        settled_rows = (
+            ("Balance", "settled_balance"),
+            ("Earned", "settled_earned"),
+            ("Spent", "settled_spent"),
+            ("This hour", "settled_hour"),
+            ("Lifetime CU", "settled_lifetime"),
+            ("Cap usage", "settled_caps"),
+            ("Last settled", "settled_at"),
+        )
+        for index, (label, key) in enumerate(settled_rows):
+            ttk.Label(settled, text=label, style="Hint.TLabel").grid(
+                row=index, column=0, sticky="w", pady=3
+            )
+            ttk.Label(settled, textvariable=self._var(key), style="Value.TLabel").grid(
+                row=index, column=1, sticky="w", padx=(18, 0), pady=3
+            )
+        settled.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            frame,
+            text="Hourly credits and the wallet settle with the monitor. Cap usage is tracked "
+            "on this machine, so there is no estimated chart.",
+            style="Hint.TLabel",
+            wraplength=700,
+        ).pack(fill="x", pady=(14, 0))
 
     def _build_history(self, notebook):
         frame = self._tab("History")
@@ -161,33 +247,50 @@ class DesktopApp(tk.Tk):
         form = ttk.Frame(frame)
         form.pack(fill="x", anchor="n")
 
-        ttk.Label(form, text="Compute mode").grid(row=0, column=0, sticky="w", pady=4)
-        mode = ttk.Combobox(
-            form, textvariable=self._var("mode_input"), values=MODES, width=16, state="readonly"
-        )
-        mode.grid(row=0, column=1, sticky="w", padx=(16, 0))
-
-        ttk.Label(form, text="Auto-lend on start").grid(row=1, column=0, sticky="w", pady=4)
-        auto = ttk.Checkbutton(form, variable=self._auto)
-        auto.grid(row=1, column=1, sticky="w", padx=(16, 0))
-
-        labels = (
-            ("Daily cap (minutes, 0 = unlimited)", "cap_day"),
-            ("Weekly cap (minutes)", "cap_week"),
-            ("Monthly cap (minutes)", "cap_month"),
+        identity = ttk.LabelFrame(form, text="Identity", padding=12)
+        identity.pack(fill="x", anchor="n")
+        identity_rows = (
             ("Profile name", "profile_name"),
             ("Profile status", "profile_status"),
             ("Profile avatar", "profile_avatar"),
         )
-        for offset, (label, key) in enumerate(labels, start=2):
-            ttk.Label(form, text=label).grid(row=offset, column=0, sticky="w", pady=4)
-            ttk.Entry(form, textvariable=self._var(key), width=34).grid(
+        for offset, (label, key) in enumerate(identity_rows):
+            ttk.Label(identity, text=label).grid(row=offset, column=0, sticky="w", pady=4)
+            ttk.Entry(identity, textvariable=self._var(key), width=34).grid(
                 row=offset, column=1, sticky="w", padx=(16, 0)
             )
 
-        ttk.Button(frame, text="Save settings", command=self._save_settings).pack(
-            anchor="w", pady=(16, 0)
+        connection = ttk.LabelFrame(form, text="Connection", padding=12)
+        connection.pack(fill="x", anchor="n", pady=(14, 0))
+        ttk.Label(connection, text="Monitor URL").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Entry(connection, textvariable=self._var("server_url"), width=34).grid(
+            row=0, column=1, sticky="w", padx=(16, 0)
         )
+        ttk.Label(connection, text="Enrollment key").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Entry(connection, textvariable=self._var("enrollment_key"), width=34, show="•").grid(
+            row=1, column=1, sticky="w", padx=(16, 0)
+        )
+        ttk.Label(
+            connection,
+            text="The operator enrollment key keeps the network private. It is stored locally "
+            "and never shown in full.",
+            style="Hint.TLabel",
+            wraplength=640,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        actions = ttk.Frame(frame)
+        actions.pack(fill="x", pady=(16, 0))
+        ttk.Button(actions, text="Save settings", command=self._save_settings).pack(side="left")
+        ttk.Button(actions, text="Reconnect", command=lambda: self._run(["connect"])).pack(
+            side="left", padx=(8, 0)
+        )
+
+        ttk.Label(
+            frame,
+            text="Compute mode, lending plan and caps live in the Compute tab.",
+            style="Hint.TLabel",
+            wraplength=700,
+        ).pack(fill="x", pady=(18, 0))
 
     def _build_messages(self, notebook):
         frame = self._tab("Messages")
@@ -198,6 +301,7 @@ class DesktopApp(tk.Tk):
             toolbar, textvariable=self._var("message_to"), width=30, state="readonly"
         )
         self._peer_box.pack(side="left", padx=(8, 8))
+        ttk.Button(toolbar, text="New group", command=self._new_group).pack(side="left")
         ttk.Button(toolbar, text="Refresh", command=self._refresh_messages).pack(side="right")
 
         body = ttk.Frame(frame)
@@ -347,10 +451,7 @@ class DesktopApp(tk.Tk):
             return
         lines = []
         for group in groups:
-            names = ", ".join(
-                member.get("name") or member.get("id", "")[:8] for member in group.get("members") or []
-            )
-            lines.append(f"{group.get('name')}  ·  {names}")
+            lines.append(f"{group.get('name') or 'group'}  ·  {group_member_summary(group)}")
         self._set_groups("\n".join(lines))
 
     def _set_groups(self, text):
@@ -374,16 +475,21 @@ class DesktopApp(tk.Tk):
             current = self._notebook.tab(self._notebook.select(), "text")
         except tk.TclError:
             return
-        if current == "Messages":
-            self._refresh_messages()
-        elif current == "History":
-            self._refresh_history()
-        elif current == "Agent":
-            self._refresh_agent()
-        elif current == "Logs":
-            self._refresh_logs()
-        elif current == "Settings":
-            self._load_settings()
+        handlers = {
+            "Messages": self._refresh_messages,
+            "History": self._refresh_history,
+            "Agent": self._refresh_agent,
+            "Logs": self._refresh_logs,
+            "Settings": self._load_settings,
+            "Compute": self._load_compute,
+        }
+        handler = handlers.get(current)
+        if not handler:
+            return
+        try:
+            handler()
+        except Exception as error:
+            self._var("status").set(f"could not load {current.lower()}: {error}")
 
     def _refresh(self):
         try:
@@ -398,11 +504,15 @@ class DesktopApp(tk.Tk):
         usage = caps_usage(wallet)
         heartbeat_pid = running_pid("heartbeat")
         worker_pid = running_pid("worker")
+        credits = read_credits()
+        summary = compute_summary(config, wallet, credits, usage)
 
         self._var("server").set(config.get("server_url") or "-")
         self._var("device").set(config.get("profile_name") or config.get("device_name") or "unregistered")
         self._var("device_id").set(config.get("device_id") or "not registered")
-        self._var("mode").set(config.get("compute_mode") or "off")
+        self._var("mode").set(
+            f"{summary['mode_label']} · {'enabled' if config.get('compute_enabled') else 'paused'}"
+        )
         heartbeat = "running" if heartbeat_pid else "stopped"
         last_ok = runtime.get("last_heartbeat_ok")
         if last_ok:
@@ -418,14 +528,16 @@ class DesktopApp(tk.Tk):
             worker_text += f" · {worker['last_error']}"
         self._var("worker").set(worker_text)
         self._var("wallet").set(
-            f"{wallet.get('balance', 0.0):.4f} CU · earned {wallet.get('earned_total', 0.0):.4f}"
-            f" · sent {wallet.get('spent_total', 0.0):.4f}"
+            f"{summary['balance']} · earned {summary['earned']} · sent {summary['spent']}"
         )
-        self._var("caps").set(
-            f"{usage['day_used']:.0f}/{limits['day_minutes'] or '∞'} min"
-            f" · week {usage['week_used']:.0f}/{limits['week_minutes'] or '∞'}"
-            f" · month {usage['month_used']:.0f}/{limits['month_minutes'] or '∞'}"
-        )
+        self._var("caps").set(summary["caps_text"])
+        self._var("settled_balance").set(summary["balance"])
+        self._var("settled_earned").set(summary["earned"])
+        self._var("settled_spent").set(summary["spent"])
+        self._var("settled_hour").set(summary["hour_text"])
+        self._var("settled_lifetime").set(summary["lifetime"])
+        self._var("settled_caps").set(summary["caps_text"])
+        self._var("settled_at").set(summary["last_settled"])
         last = worker.get("last_result") or {}
         if last:
             task_text = f"{str(last.get('task_id') or '')[:8]} {last.get('status') or ''}".strip()
@@ -446,41 +558,74 @@ class DesktopApp(tk.Tk):
 
     def _load_settings(self):
         config = load_config()
-        self._var("mode_input").set(config.get("compute_mode") or "off")
-        self._auto.set(bool(config.get("auto_lend_on_start", True)))
-        for key, field in (
-            ("cap_day", "max_compute_minutes_day"),
-            ("cap_week", "max_compute_minutes_week"),
-            ("cap_month", "max_compute_minutes_month"),
-        ):
-            self._var(key).set(str(int(config.get(field) or 0)))
         for key, field in (
             ("profile_name", "profile_name"),
             ("profile_status", "profile_status"),
             ("profile_avatar", "profile_avatar"),
+            ("server_url", "server_url"),
+            ("enrollment_key", "enrollment_key"),
         ):
             self._var(key).set(str(config.get(field) or ""))
 
     def _save_settings(self):
         try:
             config = load_config()
-            config["compute_mode"] = self._var("mode_input").get() or "off"
+            config["profile_name"] = self._var("profile_name").get().strip()[:48]
+            config["profile_status"] = self._var("profile_status").get().strip()[:120]
+            config["profile_avatar"] = self._var("profile_avatar").get().strip()[:8]
+            server = self._var("server_url").get().strip()
+            if server:
+                config["server_url"] = normalize_server(server)
+            enrollment_key = self._var("enrollment_key").get().strip()
+            if enrollment_key:
+                config["enrollment_key"] = enrollment_key
+        except ValueError as error:
+            self._var("status").set(str(error))
+            return
+        save_config(config)
+        self._var("status").set("settings saved")
+        self._refresh()
+
+    def _load_compute(self):
+        try:
+            config = load_config()
+        except RuntimeError as error:
+            self._var("status").set(str(error))
+            return
+        plan = compute_plan(config)
+        self._mode_var.set(plan["mode"])
+        self._auto.set(plan["auto_lend"])
+        self._var("plan_cpu").set(str(plan["cpu_pct"]))
+        self._var("plan_minutes").set(str(plan["minutes_per_hour"]))
+        self._var("plan_units").set(f"{plan['units_per_hour']:.2f}")
+        self._var("cap_day").set(str(plan["cap_day"]))
+        self._var("cap_week").set(str(plan["cap_week"]))
+        self._var("cap_month").set(str(plan["cap_month"]))
+
+    def _save_compute(self):
+        try:
+            config = load_config()
+            config["compute_mode"] = self._mode_var.get() or "off"
             config["auto_lend_on_start"] = bool(self._auto.get())
+            config["lend_cpu_pct"] = max(1, min(100, int(self._var("plan_cpu").get().strip() or 20)))
+            config["lend_minutes_per_hour"] = max(
+                1, min(60, int(self._var("plan_minutes").get().strip() or 30))
+            )
+            config["lend_units_per_hour"] = max(
+                0.01, min(100.0, float(self._var("plan_units").get().strip() or 1.0))
+            )
             for key, field in (
                 ("cap_day", "max_compute_minutes_day"),
                 ("cap_week", "max_compute_minutes_week"),
                 ("cap_month", "max_compute_minutes_month"),
             ):
-                raw = self._var(key).get().strip() or "0"
-                config[field] = max(0, int(raw))
-            config["profile_name"] = self._var("profile_name").get().strip()[:48]
-            config["profile_status"] = self._var("profile_status").get().strip()[:120]
-            config["profile_avatar"] = self._var("profile_avatar").get().strip()[:8]
+                config[field] = max(0, int(self._var(key).get().strip() or 0))
         except ValueError:
-            self._var("status").set("caps must be whole minutes")
+            self._var("status").set("the plan needs whole minutes and a numeric CU rate")
             return
         save_config(config)
-        self._var("status").set("settings saved")
+        self._var("status").set("compute plan saved")
+        self._load_compute()
         self._refresh()
 
     def _run(self, arguments):
@@ -522,7 +667,11 @@ class DesktopApp(tk.Tk):
         return payload.get("peers") or []
 
     def _refresh_history(self):
-        config = load_config()
+        try:
+            config = load_config()
+        except RuntimeError as error:
+            self._set_history(str(error))
+            return
         if not config.get("device_id") or not config.get("token"):
             self._set_history("Device is not registered yet. Connect from the Overview tab.")
             return
@@ -570,7 +719,11 @@ class DesktopApp(tk.Tk):
         self._history.configure(state="disabled")
 
     def _refresh_messages(self):
-        config = load_config()
+        try:
+            config = load_config()
+        except RuntimeError as error:
+            self._set_messages(str(error))
+            return
         if not config.get("device_id") or not config.get("token"):
             self._set_messages("Device is not registered yet. Connect from the Overview tab.")
             return
@@ -582,37 +735,103 @@ class DesktopApp(tk.Tk):
             client = ApiClient(config["server_url"], token=config.get("token"))
             payload = client.get_messages(config["device_id"])
             peers = client.get_peers(config["device_id"]).get("peers") or []
+            groups = client.get_groups(config["device_id"]).get("groups") or []
         except (ApiError, OSError, ValueError) as error:
             self.after(0, self._set_messages, f"Could not load messages: {error}")
             return
-        self._peers = {"all": None}
-        for peer in peers:
-            if peer.get("id") != config["device_id"]:
-                label = peer.get("profile_name") or peer.get("name") or peer.get("id")
-                self._peers[f"{label} ({peer.get('id', '')[:8]})"] = peer.get("id")
         messages = payload.get("messages") or []
-        lines = []
-        for message in messages[-40:]:
-            sender = message.get("from") or "operator"
-            target = message.get("to") or "all"
-            kind = message.get("kind") or message.get("topic") or "chat"
-            credit = message.get("credit")
-            suffix = ""
-            if isinstance(credit, dict) and credit.get("amount") is not None:
-                suffix = f" [{credit.get('kind', 'credit')} {float(credit.get('amount') or 0):.4f} CU]"
-            lines.append(f"{message.get('created_at', '')}  {sender} -> {target}  ({kind}){suffix}")
-            lines.append(f"    {message.get('body', '')}")
-        self.after(0, self._set_messages, "\n".join(lines) or "Inbox is empty.")
+        lines = message_lines(messages, peers, groups, config["device_id"])
+        self.after(0, self._set_messages, "\n".join(lines) or "Inbox is empty.", peers, groups)
 
-    def _set_messages(self, text):
+    def _set_messages(self, text, peers=None, groups=None):
         self._messages.configure(state="normal")
         self._messages.delete("1.0", "end")
         self._messages.insert("end", text + "\n")
         self._messages.configure(state="disabled")
-        labels = list(self._peers) or ["all"]
+        if peers is not None:
+            device_id = None
+            try:
+                device_id = load_config().get("device_id")
+            except RuntimeError:
+                device_id = None
+            self._peers = dict(conversation_targets(peers, groups, device_id))
+        labels = list(self._peers) or [COMMUNITY_LABEL]
         self._peer_box.configure(values=labels)
-        if not self._var("message_to").get():
+        if self._var("message_to").get() not in self._peers:
             self._var("message_to").set(labels[0])
+
+    def _new_group(self):
+        try:
+            config = load_config()
+        except RuntimeError as error:
+            self._var("status").set(str(error))
+            return
+        if not config.get("device_id") or not config.get("token"):
+            self._var("status").set("connect this device first")
+            return
+        thread = threading.Thread(target=self._open_group_dialog, args=(config,), daemon=True)
+        thread.start()
+
+    def _open_group_dialog(self, config):
+        try:
+            client = ApiClient(config["server_url"], token=config.get("token"))
+            peers = client.get_peers(config["device_id"]).get("peers") or []
+        except (ApiError, OSError, ValueError) as error:
+            self.after(0, self._var("status").set, f"could not load peers: {error}")
+            return
+        peers = [
+            peer for peer in peers if peer.get("id") and peer.get("id") != config["device_id"]
+        ]
+        self.after(0, self._show_group_dialog, peers)
+
+    def _show_group_dialog(self, peers):
+        if not peers:
+            self._var("status").set("no peers available yet")
+            return
+        dialog = tk.Toplevel(self)
+        dialog.title("New group")
+        dialog.transient(self)
+        frame = ttk.Frame(dialog, padding=14)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Group name").grid(row=0, column=0, sticky="w")
+        name_var = tk.StringVar(value="")
+        ttk.Entry(frame, textvariable=name_var, width=32).grid(
+            row=0, column=1, sticky="w", padx=(12, 0), pady=4
+        )
+        ttk.Label(frame, text="Members").grid(row=1, column=0, sticky="nw", pady=(10, 0))
+        listbox = tk.Listbox(frame, selectmode="extended", height=min(12, max(4, len(peers))), width=44)
+        listbox.grid(row=1, column=1, sticky="w", padx=(12, 0), pady=(10, 0))
+        for peer in peers:
+            profile = peer.get("profile") or {}
+            label = profile.get("name") or peer.get("name") or str(peer.get("id"))[:8]
+            listbox.insert("end", f"{label}  ({str(peer.get('id'))[:8]})")
+
+        def create():
+            selection = listbox.curselection()
+            if not selection:
+                self._var("status").set("choose at least one peer")
+                return
+            members = [peers[index].get("id") for index in selection]
+            name = name_var.get().strip() or "Group chat"
+            dialog.destroy()
+            self._create_group(name, members)
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=2, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        ttk.Button(buttons, text="Create", command=create).pack(side="left")
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side="left", padx=(8, 0))
+
+    def _create_group(self, name, members):
+        self._var("status").set("creating group…")
+        try:
+            config = load_config()
+            client = ApiClient(config["server_url"], token=config.get("token"))
+            client.create_group(config["device_id"], name, members)
+        except (ApiError, OSError, ValueError) as error:
+            self._var("status").set(f"could not create group: {error}")
+            return
+        self._var("status").set("group created")
+        self.after(300, self._refresh_messages)
 
     def _send_message(self):
         text = self._var("message_text").get().strip()
@@ -652,11 +871,23 @@ class DesktopApp(tk.Tk):
         self._log.configure(state="disabled")
 
 
-def main():
+def main(argv=None):
+    arguments = list(sys.argv[1:] if argv is None else argv)
     try:
         app = DesktopApp()
     except tk.TclError as error:
         print(f"could not open desktop window: {error}", file=sys.stderr)
         return 1
+    if "--smoke" in arguments:
+        for name in ("Overview", "Compute", "History", "Settings", "Messages", "Agent", "Logs"):
+            app._select_tab(name)
+            app.update()
+        app.destroy()
+        print("desktop smoke test ok")
+        return 0
     app.mainloop()
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
